@@ -70,6 +70,35 @@ services:
         condition: service_healthy
     restart: "no"
 
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_CA_FILE: /certs/ca.crt
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./infra/mosquitto/certs/ca.crt:/certs/ca.crt:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   simulator:
     profiles: ["sim"]
     build:
