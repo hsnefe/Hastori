@@ -20,7 +20,9 @@ IMAGE = "eclipse-mosquitto:2.1.2-alpine"
 
 
 def main() -> None:
-    settings = get_settings()
+    settings = get_settings(
+        strict=("mqtt_ingestion_password", "mqtt_health_password", "mqtt_device_secret")
+    )
     seed = load_seed()
 
     users: dict[str, str] = {

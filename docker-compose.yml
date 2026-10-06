@@ -14,7 +14,9 @@ services:
       - tsdb-data:/var/lib/postgresql/data
       - ./infra/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # -h 127.0.0.1: during first-time init the image runs a temporary server that listens on
+      # the unix socket only; a socket check would report "healthy" before the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -27,7 +29,10 @@ services:
       - "127.0.0.1:8883:8883"
     volumes:
       - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./infra/mosquitto/certs:/mosquitto/certs:ro
+      # Only what the broker needs. The CA private key lives elsewhere (infra/mosquitto/ca-private).
+      - ./infra/mosquitto/certs/ca.crt:/mosquitto/certs/ca.crt:ro
+      - ./infra/mosquitto/certs/server.crt:/mosquitto/certs/server.crt:ro
+      - ./infra/mosquitto/certs/server.key:/mosquitto/certs/server.key:ro
       # passwd + acl, written with the right owner and mode by `make mqtt-auth`
       - mosquitto-auth:/mosquitto/auth:ro
       - mosquitto-data:/mosquitto/data
@@ -40,7 +45,7 @@ services:
           mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt
           -u $$MQTT_HEALTH_USER -P "$$(cat /run/secrets/mqtt_health_password)"
           -t '$$SYS/broker/uptime' -C 1 -W 3
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 20
 
@@ -70,22 +75,38 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
-    restart: "no"
+    # A failed run (database not accepting connections yet) is retried; later services wait for
+    # a successful exit.
+    restart: on-failure:5
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
 
   ingestion:
     build:
       context: .
       dockerfile: services/ingestion/Dockerfile
-    env_file: .env
+    # No env_file: each service gets only the variables it needs, so a compromised container
+    # does not hold every secret (the device secret derives every device password).
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
       MQTT_HOST: mosquitto
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /certs/ca.crt
+      MQTT_INGESTION_USER: ${MQTT_INGESTION_USER}
+      MQTT_INGESTION_PASSWORD: ${MQTT_INGESTION_PASSWORD}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
-      # The MQTT session lives under this id. A second replica needs its own stable id
-      # (ingestion-2, ...); a random id would strand its queued messages.
-      INGEST_CLIENT_ID: ingestion-1
+      INGEST_HTTP_PORT: "8001"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # The broker uses the MQTT user name as the client id (use_username_as_clientid), so this
+      # value only labels the client. A second replica needs its own MQTT user (and ACL).
+      INGEST_CLIENT_ID: ingestion
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 512m
     # SIGTERM drains the queue (up to INGEST_SHUTDOWN_DEADLINE_S = 20 s) before exiting.
     stop_grace_period: 40s
     ports:
@@ -100,6 +121,7 @@ services:
       rabbitmq:
         condition: service_healthy
     healthcheck:
+      # /healthz fails (503) when a background loop has died; the process then also exits.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz')"]
       interval: 10s
       timeout: 5s
@@ -111,11 +133,26 @@ services:
     build:
       context: .
       dockerfile: services/simulator/Dockerfile
-    env_file: .env
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /certs/ca.crt
+      MQTT_DEVICE_SECRET: ${MQTT_DEVICE_SECRET}
+      SIM_SEED: ${SIM_SEED:-42}
+      SIM_CONTROL_PORT: "8002"
+      SIM_CONTROL_TOKEN: ${SIM_CONTROL_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8002), 3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     ports:
       - "127.0.0.1:8002:8002"
     volumes:

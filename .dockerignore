@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+.claude
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+node_modules
+infra/mosquitto/certs
+infra/mosquitto/ca-private
+infra/mosquitto/health.pw
+tests
