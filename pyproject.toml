@@ -52,7 +52,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM"]
 strict = true
 python_version = "3.12"
 explicit_package_bases = true
-mypy_path = "packages/common/src:services/ingestion/src:services/simulator/src:services/alarm/src:services/api/src"
+mypy_path = "packages/common/src:services/ingestion/src:services/simulator/src:services/alarm/src:services/api/src:scripts"
 
 [[tool.mypy.overrides]]
 module = ["aiomqtt.*", "aio_pika.*", "pwdlib.*", "asyncpg.*"]

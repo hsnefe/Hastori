@@ -59,6 +59,11 @@ resilience:
 reset-alarm-queue:
 	uv run python scripts/reset_alarm_queue.py
 
+# Day-2 checks against the running stack: authorization matrix, alarm lifecycle, restart, rule
+# change, dead letters, reactive ratio (about 15 minutes; ARGS="--skip-reactive --skip-restart")
+e2e:
+	uv run python scripts/e2e.py $(ARGS)
+
 test:
 	uv run pytest
 
