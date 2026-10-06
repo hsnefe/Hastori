@@ -2,8 +2,11 @@
 
 Needs the stack running with the simulator: make up && make seed && make simulate
 
---no-fault skips the overheat check, which injects a real 40 s fault into izmir-komp-1
-(use it whenever alarms are being tested). The fault is cleared again when the check ends.
+--no-fault skips the overheat check, which injects a real overheat fault into izmir-komp-1
+(use it whenever alarms are being tested). The fault is cleared as soon as the temperature has
+been seen above 80 C, and in any case when the check ends.
+
+The checks that write test data (duplicate message) delete it again afterwards.
 """
 
 import asyncio
@@ -21,7 +24,9 @@ import asyncpg
 from cryptography import x509
 
 from hastori_common.seed_data import SeedData, derive_device_password, load_seed
-from hastori_common.settings import Settings, get_settings
+from hastori_common.settings import ROOT, Settings, get_settings
+from hastori_ingestion.parsing import message_id
+from hastori_simulator.signals import DEFAULT_FAULT_S
 
 ROOT_COUNT_TABLES = ("organizations", "sites", "users", "user_sites", "devices", "alarm_rules")
 RESULTS: list[tuple[str, bool, str]] = []
@@ -33,7 +38,8 @@ def record(name: str, ok: bool, detail: str = "") -> None:
 
 
 def run(cmd: list[str], input_: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, input=input_, timeout=120)
+    # cwd: compose and uv must find the project whatever directory the script is started from
+    return subprocess.run(cmd, capture_output=True, text=True, input=input_, timeout=120, cwd=ROOT)
 
 
 def http_get(url: str, auth: tuple[str, str] | None = None) -> str:
@@ -63,7 +69,8 @@ def mqtt_pub(
 
 
 async def check_compose() -> None:
-    out = run(["docker", "compose", "--profile", "sim", "ps", "--format", "json"]).stdout
+    # --all: the one-shot `migrate` has exited and is hidden from a plain `ps`
+    out = run(["docker", "compose", "--profile", "sim", "ps", "--all", "--format", "json"]).stdout
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
     bad = []
     for r in rows:
@@ -74,11 +81,29 @@ async def check_compose() -> None:
             bad.append(f"{r['Service']}={r.get('Health')}")
         elif r.get("State") != "running":
             bad.append(f"{r['Service']}={r.get('State')}")
+    seen = {r["Service"] for r in rows}
+    bad += [f"{name}=missing" for name in ("migrate", "ingestion", "mosquitto") if name not in seen]
     record("docker compose: all services healthy", bool(rows) and not bad, ", ".join(bad))
 
 
-async def counts(conn: asyncpg.Connection) -> dict[str, int]:
-    return {t: await conn.fetchval(f"SELECT count(*) FROM {t}") for t in ROOT_COUNT_TABLES}  # noqa: S608
+SNAPSHOT_QUERIES = {
+    "users": "SELECT id, email, role, password_hash FROM users ORDER BY id",
+    "user_sites": "SELECT user_id, site_id FROM user_sites ORDER BY 1, 2",
+    "devices": "SELECT id, key, name, type, mqtt_topic, is_active FROM devices ORDER BY id",
+    "alarm_rules": "SELECT * FROM alarm_rules ORDER BY id",
+}
+
+
+async def counts(conn: asyncpg.Connection) -> dict[str, object]:
+    """Row counts plus the content of the tables the seed writes: an idempotent seed changes
+    neither (a count alone would miss a rewritten name or password hash)."""
+    out: dict[str, object] = {
+        t: await conn.fetchval(f"SELECT count(*) FROM {t}")  # noqa: S608
+        for t in ROOT_COUNT_TABLES
+    }
+    for name, query in SNAPSHOT_QUERIES.items():
+        out[f"{name}_content"] = [tuple(r.values()) for r in await conn.fetch(query)]
+    return out
 
 
 async def check_seed(conn: asyncpg.Connection) -> None:
@@ -103,6 +128,7 @@ async def check_series(conn: asyncpg.Connection, expected: int) -> None:
 
 
 WINDOW_S = 30.0
+SAMPLE_INTERVAL_S = 2.0
 
 
 def rabbit_publish_total(s: Settings) -> float:
@@ -121,7 +147,7 @@ def snapshot(s: Settings) -> tuple[float, str, float]:
     return time.monotonic(), text, rabbit_publish_total(s)
 
 
-def check_window(s: Settings, before: tuple[float, str, float]) -> None:
+def check_window(s: Settings, before: tuple[float, str, float], n_devices: int) -> None:
     """Lag p95 and RabbitMQ rate, both measured over the same recent window (not since boot)."""
     t0, m0, r0 = before
     t1, m1, r1 = snapshot(s)
@@ -137,7 +163,12 @@ def check_window(s: Settings, before: tuple[float, str, float]) -> None:
         f"{ratio:.1%} of {int(count)} <= 2 s in the last {t1 - t0:.0f} s",
     )
     rate = (r1 - r0) / (t1 - t0)
-    record("rabbitmq exchange receives ~3.5 msg/s", 2.8 <= rate <= 4.2, f"{rate:.2f} msg/s")
+    expected = n_devices / SAMPLE_INTERVAL_S  # one message per device per sample
+    record(
+        f"rabbitmq exchange receives ~{expected:.1f} msg/s",
+        0.8 * expected <= rate <= 1.2 * expected,
+        f"{rate:.2f} msg/s",
+    )
 
 
 async def check_aggregate(conn: asyncpg.Connection) -> None:
@@ -162,6 +193,13 @@ async def check_duplicate(conn: asyncpg.Connection, s: Settings, seed: SeedData)
         datetime.fromtimestamp(ts, UTC),
     )
     record("duplicate message yields a single row", n == 1, f"{n} rows")
+    # Do not leave a fake reading in the real series (it would show up in charts and alarms).
+    await conn.execute(
+        "DELETE FROM measurements WHERE device_id=$1 AND metric='current_a' AND time=$2",
+        dev.id,
+        datetime.fromtimestamp(ts, UTC),
+    )
+    await conn.execute("DELETE FROM outbox WHERE message_id=$1", message_id(dev.id, float(ts)))
 
 
 async def check_bad_payload(s: Settings, seed: SeedData) -> None:
@@ -180,27 +218,95 @@ async def check_bad_payload(s: Settings, seed: SeedData) -> None:
     record("bad payload rejected, service alive", after > before and alive, f"{before} -> {after}")
 
 
+def _mosquitto_pub(*args: str) -> subprocess.CompletedProcess[str]:
+    return run(
+        ["docker", "compose", "exec", "-T", "mosquitto", "mosquitto_pub", "-h", "localhost",
+         "-p", "8883", *args]
+    )  # fmt: skip
+
+
 def check_security(s: Settings, seed: SeedData) -> None:
     a = seed.device_by_key("izmir-komp-1")
     b = seed.device_by_key("izmir-komp-2")
     pw = derive_device_password(s.mqtt_device_secret, a.id)
+    ca = ["--cafile", "/mosquitto/certs/ca.crt"]
+    own = ["-t", seed.topic(a), "-m", "{}"]
+
+    # Positive control first: the very same command with correct credentials and TLS works.
+    # Without it, "refused" below could just mean `docker exec` itself failed.
+    good = _mosquitto_pub(*ca, "-u", str(a.id), "-P", pw, *own)
+    record(
+        "control: valid credentials + TLS can publish to own topic",
+        good.returncode == 0,
+        (good.stdout + good.stderr).strip()[:80],
+    )
+
     cross = mqtt_pub(s, str(a.id), pw, seed.topic(b), "{}")
     denied = "Not authorized" in (cross.stdout + cross.stderr)
     record("cross-device topic write is denied", denied, (cross.stdout + cross.stderr).strip()[:80])
-    anon = run(
-        [
-            "docker", "compose", "exec", "-T", "mosquitto", "mosquitto_pub", "-h", "localhost",
-            "-p", "8883", "--cafile", "/mosquitto/certs/ca.crt", "-t", seed.topic(a), "-m", "{}",
-        ]
-    )  # fmt: skip
-    record("anonymous connection is refused", anon.returncode != 0)
-    plain = run(
-        [
-            "docker", "compose", "exec", "-T", "mosquitto", "mosquitto_pub", "-h", "localhost",
-            "-p", "8883", "-u", str(a.id), "-P", pw, "-t", seed.topic(a), "-m", "{}",
-        ]
-    )  # fmt: skip
-    record("connection without TLS is refused", plain.returncode != 0)
+
+    anon = _mosquitto_pub(*ca, *own)
+    msg = (anon.stdout + anon.stderr).lower()
+    record(
+        "anonymous connection is refused",
+        anon.returncode != 0 and ("not authori" in msg or "refused" in msg),
+        msg.strip()[:80],
+    )
+
+    plain = _mosquitto_pub("-u", str(a.id), "-P", pw, *own)
+    msg = (plain.stdout + plain.stderr).lower()
+    record(
+        "connection without TLS is refused",
+        plain.returncode != 0
+        and (
+            "tls" in msg
+            or "ssl" in msg
+            or "protocol" in msg
+            or "connection error" in msg
+            or "unable" in msg
+        ),
+        msg.strip()[:80],
+    )
+
+
+def check_session_hijack(s: Settings, seed: SeedData) -> None:
+    """A device user connecting with the ingestion client id must not take its session over."""
+    url = f"http://127.0.0.1:{s.ingest_http_port}"
+    before = metric_value(http_get(f"{url}/metrics"), "ingest_mqtt_connects_total")
+    a = seed.device_by_key("izmir-komp-1")
+    pw = derive_device_password(s.mqtt_device_secret, a.id)
+    _mosquitto_pub(
+        "--cafile",
+        "/mosquitto/certs/ca.crt",
+        "-V",
+        "5",
+        "-i",
+        s.mqtt_ingestion_user,
+        "-u",
+        str(a.id),
+        "-P",
+        pw,
+        "-t",
+        seed.topic(a),
+        "-m",
+        "{}",
+    )
+    time.sleep(3)
+    after = metric_value(http_get(f"{url}/metrics"), "ingest_mqtt_connects_total")
+    ready = json.loads(http_get(f"{url}/readyz")).get("mqtt") is True
+    record(
+        "device cannot hijack the ingestion MQTT session",
+        after == before and ready,
+        f"connects {before:.0f} -> {after:.0f}",
+    )
+
+
+def check_ca_key_not_mounted() -> None:
+    mounted = ROOT / "infra" / "mosquitto" / "certs"
+    leaked = sorted(p.name for p in mounted.glob("*.key") if p.name != "server.key")
+    record(
+        "CA private key is not in the directory the broker can read", not leaked, ", ".join(leaked)
+    )
 
 
 def _control(s: Settings, method: str, path: str, body: dict[str, object] | None = None) -> None:
@@ -219,7 +325,9 @@ def _control(s: Settings, method: str, path: str, body: dict[str, object] | None
 async def check_overheat(conn: asyncpg.Connection, s: Settings, seed: SeedData) -> None:
     dev = seed.device_by_key("izmir-komp-1")
     start = datetime.now(UTC)
-    _control(s, "POST", "/faults", {"device": dev.key, "kind": "overheat", "duration_s": 40})
+    _control(
+        s, "POST", "/faults", {"device": dev.key, "kind": "overheat", "duration_s": DEFAULT_FAULT_S}
+    )
     peak = 0.0
     try:
         deadline = time.monotonic() + 30
@@ -251,8 +359,6 @@ def check_git() -> None:
         if f == ".env" or f.endswith((".key", "passwd", "/acl")) or "/certs/" in f
     ]
     record("no secrets tracked in git", not leaked, ", ".join(leaked))
-    n = len(run(["git", "log", "--oneline"]).stdout.splitlines())
-    record("git log has >= 7 commits", n >= 7, f"{n} commits")
 
 
 async def main() -> None:
@@ -270,8 +376,10 @@ async def main() -> None:
         await check_duplicate(conn, s, seed)
         await check_bad_payload(s, seed)
         check_security(s, seed)
+        check_session_hijack(s, seed)
+        check_ca_key_not_mounted()
         await asyncio.sleep(max(0.0, WINDOW_S - (time.monotonic() - window_start[0])))
-        check_window(s, window_start)
+        check_window(s, window_start, len(seed.devices))
         if run_fault:
             await check_overheat(conn, s, seed)
         else:

@@ -1,11 +1,16 @@
-.PHONY: env up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience test lint
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience test lint
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
-DURATION ?= 40
+# Long enough for the 30 s alarm rule: the overheat ramp takes ~16 s to cross 80 C.
+DURATION ?= 60
 
 env:
 	uv run python scripts/gen_env.py
+
+# A demo that is reachable from the internet: random demo-user passwords too (printed once)
+env-public:
+	uv run python scripts/gen_env.py --public
 
 certs:
 	uv run python scripts/gen_certs.py
@@ -41,13 +46,14 @@ fault:
 smoke:
 	uv run python scripts/smoke.py
 
-# Without the overheat check (it injects a real 40 s fault into izmir-komp-1)
+# Without the overheat check (it injects a real overheat fault into izmir-komp-1)
 smoke-quick:
 	uv run python scripts/smoke.py --no-fault
 
-# Outage drills (about 5 minutes): restart ingestion, stop the database / RabbitMQ, SIGTERM under failure
+# Outage drills (about 15 minutes): restart / kill ingestion, a 6 minute ingestion outage, stop the
+# broker / database / RabbitMQ, SIGTERM under failure. `--quick` skips the long one.
 resilience:
-	uv run python scripts/resilience.py
+	uv run python scripts/resilience.py $(ARGS)
 
 test:
 	uv run pytest
