@@ -58,6 +58,18 @@ services:
       timeout: 10s
       retries: 20
 
+  migrate:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   tsdb-data:
   mosquitto-data:
