@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from hastori_api.errors import install_error_handlers
 from hastori_api.ratelimit import LoginLimiter
-from hastori_api.routers import auth, health
+from hastori_api.routers import alarm_rules, alarms, auth, devices, health, sites, users
 from hastori_api.tokens import RefreshStore
 from hastori_common.settings import Settings
 
@@ -74,7 +74,15 @@ def create_app(
     install_error_handlers(app)
 
     v1 = APIRouter(prefix="/api/v1")
-    v1.include_router(auth.router)
+    for router in (
+        auth.router,
+        sites.router,
+        devices.router,
+        alarms.router,
+        alarm_rules.router,
+        users.router,
+    ):
+        v1.include_router(router)
     app.include_router(v1)
     app.include_router(health.router)
     return app

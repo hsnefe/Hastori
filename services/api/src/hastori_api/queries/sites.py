@@ -3,10 +3,14 @@ read sites, so a route cannot forget the tenant filter."""
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hastori_api.scope import SiteScope
+from hastori_api.audit import audit
+from hastori_api.errors import conflict
+from hastori_api.schemas import SiteCreate, SitePatch
+from hastori_api.scope import SYSTEM_ADMIN, SiteScope
 from hastori_common.models import Site
 
 
@@ -22,6 +26,35 @@ async def get_site(session: AsyncSession, scope: SiteScope, site_id: uuid.UUID) 
     return site
 
 
-async def count_sites(session: AsyncSession, scope: SiteScope) -> int:
-    stmt = select(func.count()).select_from(Site).where(Site.id.in_(scope.site_ids))
-    return int(await session.scalar(stmt) or 0)
+async def create_site(session: AsyncSession, scope: SiteScope, body: SiteCreate) -> Site:
+    scope.require_role(SYSTEM_ADMIN)
+    site = Site(org_id=scope.org_id, name=body.name, city=body.city, timezone=body.timezone)
+    session.add(site)
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise conflict("A site with this name already exists") from None
+    audit(session, scope, "site.create", "site", site.id, body.model_dump())
+    await session.commit()
+    return site
+
+
+async def patch_site(
+    session: AsyncSession, scope: SiteScope, site_id: uuid.UUID, body: SitePatch
+) -> Site:
+    scope.require_role(SYSTEM_ADMIN)
+    site = await get_site(session, scope, site_id)
+    changes = body.model_dump(exclude_unset=True, exclude_none=False)
+    for field, value in changes.items():
+        if value is None and field != "city":
+            continue  # name and timezone cannot be emptied
+        setattr(site, field, value)
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise conflict("A site with this name already exists") from None
+    audit(session, scope, "site.update", "site", site.id, changes)
+    await session.commit()
+    return site
