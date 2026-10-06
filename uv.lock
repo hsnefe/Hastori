@@ -415,7 +415,6 @@ dependencies = [
     { name = "hastori-common" },
     { name = "prometheus-client" },
     { name = "redis" },
-    { name = "tzdata" },
     { name = "uvicorn" },
 ]
 
@@ -427,7 +426,6 @@ requires-dist = [
     { name = "hastori-common", editable = "packages/common" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "redis", specifier = ">=5.2" },
-    { name = "tzdata" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

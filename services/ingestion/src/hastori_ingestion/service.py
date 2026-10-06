@@ -17,7 +17,6 @@ import logging
 import signal
 import sys
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -30,8 +29,10 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from hastori_common.dberrors import PERMANENT_DB_ERRORS, RETRYABLE_DB_ERRORS
 from hastori_common.logging import configure_logging
 from hastori_common.messaging import routing_key
+from hastori_common.serve import Server
 from hastori_common.settings import Settings, get_settings
 from hastori_ingestion import metrics
 from hastori_ingestion.batching import BatchPolicy
@@ -65,21 +66,6 @@ INSERT_SQL = (
 OUTBOX_SQL = (
     "INSERT INTO outbox (message_id, routing_key, body) VALUES ($1, $2, $3) "
     "ON CONFLICT (message_id) DO NOTHING"
-)
-
-# Only these say "this row is the problem" (SQLSTATE class 22 data exception, class 23 integrity
-# violation). Everything else the database can raise (missing table after a bad migration, wrong
-# password, read-only replica after a failover, ...) is a property of the environment and is
-# retried: dropping and acking the messages would turn an outage into silent data loss.
-PERMANENT_DB_ERRORS: tuple[type[BaseException], ...] = (
-    asyncpg.exceptions.DataError,
-    asyncpg.exceptions.IntegrityConstraintViolationError,
-)
-RETRYABLE_DB_ERRORS: tuple[type[BaseException], ...] = (
-    OSError,
-    TimeoutError,
-    asyncpg.InterfaceError,
-    asyncpg.PostgresError,
 )
 
 _STOP = object()
@@ -469,22 +455,6 @@ def build_api(app: Ingestion) -> FastAPI:
         return Response(generate_latest(metrics.REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
     return api
-
-
-class Server(uvicorn.Server):
-    """uvicorn without its own signal handling.
-
-    By default uvicorn installs SIGTERM/SIGINT handlers, stops the HTTP server first and
-    re-raises the signal afterwards, so /healthz and /metrics are already gone while the queue
-    drains. Here the service owns the signals and closes HTTP last.
-    """
-
-    def install_signal_handlers(self) -> None:
-        return None
-
-    @contextlib.contextmanager
-    def capture_signals(self) -> Iterator[None]:
-        yield
 
 
 async def run() -> None:

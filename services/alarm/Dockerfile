@@ -4,16 +4,13 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 COPY pyproject.toml uv.lock ./
 COPY packages/common packages/common
-COPY services/ingestion services/ingestion
 # uv needs every workspace member's manifest to resolve the lock file, not its source
+COPY services/ingestion/pyproject.toml services/ingestion/pyproject.toml
 COPY services/simulator/pyproject.toml services/simulator/pyproject.toml
-COPY services/alarm/pyproject.toml services/alarm/pyproject.toml
 COPY services/api/pyproject.toml services/api/pyproject.toml
-RUN uv sync --frozen --no-dev --package hastori-ingestion
-COPY alembic.ini ./
-COPY migrations migrations
-COPY seed seed
+COPY services/alarm services/alarm
+RUN uv sync --frozen --no-dev --package hastori-alarm
 # Unprivileged: nothing in here needs root at run time.
 RUN useradd --system --uid 10001 --no-create-home app
 USER 10001
-CMD ["python", "-m", "hastori_ingestion"]
+CMD ["python", "-m", "hastori_alarm"]

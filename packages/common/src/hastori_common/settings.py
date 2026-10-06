@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # Stable id: the MQTT session (and the messages queued for it) belongs to this id.
     ingest_client_id: str = "ingestion-1"
     ingest_shutdown_deadline_s: float = 20.0
+    alarm_shutdown_deadline_s: float = 20.0
     log_level: str = "INFO"
 
     @field_validator("mqtt_ca_file")

@@ -6,6 +6,8 @@ COPY pyproject.toml uv.lock ./
 COPY packages/common packages/common
 # uv needs every workspace member's manifest to resolve the lock file, not its source
 COPY services/ingestion/pyproject.toml services/ingestion/pyproject.toml
+COPY services/alarm/pyproject.toml services/alarm/pyproject.toml
+COPY services/api/pyproject.toml services/api/pyproject.toml
 COPY services/simulator services/simulator
 RUN uv sync --frozen --no-dev --package hastori-simulator
 COPY seed seed

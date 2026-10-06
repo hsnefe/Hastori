@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -157,3 +158,14 @@ def use_database(db_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv("SEED_VIEWER_PASSWORD", "viewer-test-password")
     get_settings.cache_clear()
     return db_dsn
+
+
+def load_script(name: str) -> Any:
+    """Import scripts/<name>.py (the scripts are not a package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(f"script_{name}", ROOT / "scripts" / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
