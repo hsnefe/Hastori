@@ -12,6 +12,10 @@ from typing import Literal
 FaultKind = Literal["overheat", "spike", "compensation_failure", "offline"]
 FAULT_KINDS: tuple[str, ...] = ("overheat", "spike", "compensation_failure", "offline")
 
+# Default length of an injected fault. The overheat ramp crosses 80 C after ~16 s, so a shorter
+# fault cannot satisfy the 30 s alarm rule of the demo (test_default_overheat_trips_the_demo_rule).
+DEFAULT_FAULT_S = 60.0
+
 VOLTAGE_V = 400.0
 SQRT3 = math.sqrt(3.0)
 NOISE_FRACTION = 0.03

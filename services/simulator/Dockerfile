@@ -9,4 +9,7 @@ COPY services/ingestion/pyproject.toml services/ingestion/pyproject.toml
 COPY services/simulator services/simulator
 RUN uv sync --frozen --no-dev --package hastori-simulator
 COPY seed seed
+# Unprivileged: nothing in here needs root at run time.
+RUN useradd --system --uid 10001 --no-create-home app
+USER 10001
 CMD ["python", "-m", "hastori_simulator"]

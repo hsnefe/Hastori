@@ -109,3 +109,39 @@ def test_values_stay_within_physical_bounds() -> None:
                 lo, hi = BOUNDS[k]
                 assert math.isfinite(v) and lo <= v <= hi
         now += 2
+
+
+def _longest_run_above(threshold: float, seed: int) -> float:
+    """Seconds the default overheat fault keeps a compressor continuously above `threshold`."""
+    from hastori_common.seed_data import load_seed
+    from hastori_simulator.signals import DEFAULT_FAULT_S
+
+    interval = 2.0
+    models = _site(seed)
+    t = T0
+    for _ in range(60):  # warm up one minute so the start temperature is a real one
+        sample_site(models, t, HOUR)
+        t += interval
+    comp = models[1]
+    comp.set_fault("overheat", t, DEFAULT_FAULT_S)
+    longest = run = 0
+    end = t + DEFAULT_FAULT_S + 30
+    while t < end:
+        temp = sample_site(models, t, HOUR)["izmir-komp-1"]["temperature_c"]
+        run = run + 1 if temp > threshold else 0
+        longest = max(longest, run)
+        t += interval
+    assert load_seed()  # the seed file must stay loadable for the rule test below
+    return (longest - 1) * interval
+
+
+def test_default_overheat_trips_the_demo_rule() -> None:
+    """The headline demo scenario: `make fault` must keep the temperature above the seeded
+    rule's threshold for longer than its duration_s, with margin, or no alarm ever opens."""
+    from hastori_common.seed_data import load_seed
+
+    seed = load_seed()
+    rule = next(r for r in seed.alarm_rules if r.metric == "temperature_c" and r.operator == ">")
+    for s in range(5):
+        above = _longest_run_above(rule.threshold, s)
+        assert above >= rule.duration_s + 6, (s, above, rule.duration_s)

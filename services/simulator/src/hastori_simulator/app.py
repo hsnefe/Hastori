@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 from hastori_common.logging import configure_logging
 from hastori_common.seed_data import SeedData, derive_device_password, load_seed
 from hastori_common.settings import Settings, get_settings
-from hastori_simulator.signals import FAULT_KINDS, DeviceModel, FaultKind, sample_site
+from hastori_simulator.signals import (
+    DEFAULT_FAULT_S,
+    FAULT_KINDS,
+    DeviceModel,
+    FaultKind,
+    sample_site,
+)
 
 log = logging.getLogger("simulator")
 
@@ -29,7 +35,7 @@ BACKOFF_MAX_S = 30.0
 class FaultRequest(BaseModel):
     device: str
     kind: str
-    duration_s: float = Field(default=40, gt=0, le=3600)
+    duration_s: float = Field(default=DEFAULT_FAULT_S, gt=0, le=3600)
 
 
 class Simulator:
@@ -68,6 +74,17 @@ class Simulator:
             next_t += INTERVAL_S
             await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
+    def _requeue(self, key: str, payload: bytes) -> None:
+        """Put a reading back at the front-ish of the queue (it is the oldest) unless full."""
+        q = self.queues[key]
+        if q.full():
+            return  # newer readings already queued: the oldest is the one to drop
+        items = [payload]
+        while not q.empty():
+            items.append(q.get_nowait())
+        for item in items:
+            q.put_nowait(item)
+
     async def device_loop(self, key: str) -> None:
         dev = self.seed.device_by_key(key)
         topic = self.seed.topic(dev)
@@ -88,7 +105,11 @@ class Simulator:
                     backoff = 1.0
                     while True:
                         payload = await self.queues[key].get()
-                        await client.publish(topic, payload, qos=1)
+                        try:
+                            await client.publish(topic, payload, qos=1)
+                        except aiomqtt.MqttError:
+                            self._requeue(key, payload)  # do not lose the reading we held
+                            raise
             except aiomqtt.MqttError as exc:
                 log.warning(
                     "mqtt error, reconnecting",
@@ -100,15 +121,16 @@ class Simulator:
 
 def build_api(sim: Simulator, token: str) -> FastAPI:
     def require_token(authorization: str = Header(default="")) -> None:
-        if not hmac.compare_digest(authorization, f"Bearer {token}"):
+        # bytes: compare_digest raises TypeError on non-ASCII str, which would be a 500
+        if not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
             raise HTTPException(401, "missing or wrong bearer token")
 
     api = FastAPI(title="Hastori simulator control", dependencies=[Depends(require_token)])
 
     def _status(key: str) -> dict[str, object]:
         f = sim.models[key].fault
-        if f is None:
-            return {}
+        if f is None or time.time() >= f.start + f.duration_s:
+            return {}  # none, or already over
         return {
             "device": key,
             "kind": f.kind,
@@ -118,7 +140,7 @@ def build_api(sim: Simulator, token: str) -> FastAPI:
         }
 
     @api.post("/faults")
-    def create_fault(req: FaultRequest) -> dict[str, object]:
+    async def create_fault(req: FaultRequest) -> dict[str, object]:
         if req.device not in sim.models:
             raise HTTPException(404, f"unknown device {req.device!r}")
         if req.kind not in FAULT_KINDS:
@@ -129,11 +151,11 @@ def build_api(sim: Simulator, token: str) -> FastAPI:
         return _status(req.device)
 
     @api.get("/faults")
-    def list_faults() -> list[dict[str, object]]:
+    async def list_faults() -> list[dict[str, object]]:
         return [s for k in sim.models if (s := _status(k))]
 
     @api.delete("/faults/{device}")
-    def delete_fault(device: str) -> dict[str, str]:
+    async def delete_fault(device: str) -> dict[str, str]:
         if device not in sim.models:
             raise HTTPException(404, f"unknown device {device!r}")
         sim.models[device].clear_fault()
@@ -143,7 +165,7 @@ def build_api(sim: Simulator, token: str) -> FastAPI:
 
 
 async def run() -> None:
-    settings = get_settings()
+    settings = get_settings(strict=("mqtt_device_secret", "sim_control_token"))
     configure_logging(settings.log_level)
     sim = Simulator(load_seed(), settings)
     # Bind all interfaces inside the container; compose publishes the port on 127.0.0.1 only.

@@ -1,17 +1,22 @@
-"""Trigger a simulator fault: python scripts/fault.py <device-key> <kind> [duration_s]."""
+"""Trigger a simulator fault: python scripts/fault.py <device-key> <kind> [duration_s].
+
+The default duration is 60 s: the overheat reaches 80 C after ~16 s and the demo alarm rule wants
+30 s above it.
+"""
 
 import json
 import sys
 import urllib.request
 
 from hastori_common.settings import get_settings
+from hastori_simulator.signals import DEFAULT_FAULT_S
 
 
 def main() -> None:
     if len(sys.argv) < 3:
         sys.exit("usage: fault.py <device-key> <kind> [duration_s]")
     device, kind = sys.argv[1], sys.argv[2]
-    duration = float(sys.argv[3]) if len(sys.argv) > 3 else 40.0
+    duration = float(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_FAULT_S
     settings = get_settings()
     port = settings.sim_control_port
     req = urllib.request.Request(
