@@ -1,6 +1,9 @@
 """Day-1 smoke check: automates the 'definition of done' list. Exit code 1 if any check fails.
 
 Needs the stack running with the simulator: make up && make seed && make simulate
+
+--no-fault skips the overheat check, which injects a real 40 s fault into izmir-komp-1
+(use it whenever alarms are being tested). The fault is cleared again when the check ends.
 """
 
 import asyncio
@@ -8,11 +11,14 @@ import base64
 import json
 import re
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import UTC, datetime
+from pathlib import Path
 
 import asyncpg
+from cryptography import x509
 
 from hastori_common.seed_data import SeedData, derive_device_password, load_seed
 from hastori_common.settings import Settings, get_settings
@@ -96,13 +102,42 @@ async def check_series(conn: asyncpg.Connection, expected: int) -> None:
     record("all 28 series have data within 60 s", n == expected, f"{n}/{expected}")
 
 
-def check_lag(metrics_text: str) -> None:
-    count = metric_value(metrics_text, "ingest_lag_seconds_count")
-    le2 = metric_value(metrics_text, "ingest_lag_seconds_bucket", '{le="2.0"}')
+WINDOW_S = 30.0
+
+
+def rabbit_publish_total(s: Settings) -> float:
+    user, pw = "hastori", "hastori_demo"
+    m = re.match(r"amqp://([^:]+):([^@]+)@", s.rabbitmq_url)
+    if m:
+        user, pw = m.group(1), m.group(2)
+    data = json.loads(
+        http_get("http://127.0.0.1:15672/api/exchanges/%2F/hastori.telemetry", (user, pw))
+    )
+    return float(data.get("message_stats", {}).get("publish_in", 0))
+
+
+def snapshot(s: Settings) -> tuple[float, str, float]:
+    text = http_get(f"http://127.0.0.1:{s.ingest_http_port}/metrics")
+    return time.monotonic(), text, rabbit_publish_total(s)
+
+
+def check_window(s: Settings, before: tuple[float, str, float]) -> None:
+    """Lag p95 and RabbitMQ rate, both measured over the same recent window (not since boot)."""
+    t0, m0, r0 = before
+    t1, m1, r1 = snapshot(s)
+    count = metric_value(m1, "ingest_lag_seconds_count")
+    count -= metric_value(m0, "ingest_lag_seconds_count")
+    le2 = metric_value(m1, "ingest_lag_seconds_bucket", '{le="2.0"}') - metric_value(
+        m0, "ingest_lag_seconds_bucket", '{le="2.0"}'
+    )
     ratio = le2 / count if count else 0.0
     record(
-        "ingest lag p95 < 2 s", count > 0 and ratio >= 0.95, f"{ratio:.1%} of {int(count)} <= 2 s"
+        "ingest lag p95 < 2 s",
+        count > 0 and ratio >= 0.95,
+        f"{ratio:.1%} of {int(count)} <= 2 s in the last {t1 - t0:.0f} s",
     )
+    rate = (r1 - r0) / (t1 - t0)
+    record("rabbitmq exchange receives ~3.5 msg/s", 2.8 <= rate <= 4.2, f"{rate:.2f} msg/s")
 
 
 async def check_aggregate(conn: asyncpg.Connection) -> None:
@@ -168,45 +203,44 @@ def check_security(s: Settings, seed: SeedData) -> None:
     record("connection without TLS is refused", plain.returncode != 0)
 
 
-async def check_rabbit(s: Settings) -> None:
-    user, pw = "hastori", "hastori_demo"
-    m = re.match(r"amqp://([^:]+):([^@]+)@", s.rabbitmq_url)
-    if m:
-        user, pw = m.group(1), m.group(2)
-    rate = 0.0
-    for _ in range(6):  # management stats refresh every ~5 s
-        data = json.loads(
-            http_get("http://127.0.0.1:15672/api/exchanges/%2F/hastori.telemetry", (user, pw))
-        )
-        rate = data.get("message_stats", {}).get("publish_in_details", {}).get("rate", 0.0)
-        if rate > 0:
-            break
-        await asyncio.sleep(5)
-    record("rabbitmq exchange receives ~3.5 msg/s", 2.0 <= rate <= 5.0, f"{rate:.2f} msg/s")
+def _control(s: Settings, method: str, path: str, body: dict[str, object] | None = None) -> None:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{s.sim_control_port}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {s.sim_control_token}",
+        },
+        method=method,
+    )
+    urllib.request.urlopen(req, timeout=5).read()  # noqa: ASYNC210
 
 
 async def check_overheat(conn: asyncpg.Connection, s: Settings, seed: SeedData) -> None:
     dev = seed.device_by_key("izmir-komp-1")
     start = datetime.now(UTC)
-    body = json.dumps({"device": dev.key, "kind": "overheat", "duration_s": 40}).encode()
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{s.sim_control_port}/faults",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    urllib.request.urlopen(req, timeout=5).read()  # noqa: ASYNC210
+    _control(s, "POST", "/faults", {"device": dev.key, "kind": "overheat", "duration_s": 40})
     peak = 0.0
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline and peak <= 80:
-        await asyncio.sleep(3)
-        peak = await conn.fetchval(
-            "SELECT coalesce(max(value), 0) FROM measurements "
-            "WHERE device_id=$1 AND metric='temperature_c' AND time > $2",
-            dev.id,
-            start,
-        )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and peak <= 80:
+            await asyncio.sleep(3)
+            peak = await conn.fetchval(
+                "SELECT coalesce(max(value), 0) FROM measurements "
+                "WHERE device_id=$1 AND metric='temperature_c' AND time > $2",
+                dev.id,
+                start,
+            )
+    finally:
+        _control(s, "DELETE", f"/faults/{dev.key}")  # leave no fault behind for later tests
     record("overheat fault produces > 80 C within 30 s", peak > 80, f"peak {peak:.1f}")
+
+
+def check_certificate() -> None:
+    cert_file = Path(__file__).resolve().parents[1] / "infra/mosquitto/certs/server.crt"
+    cert = x509.load_pem_x509_certificate(cert_file.read_bytes())
+    days = (cert.not_valid_after_utc - datetime.now(UTC)).days
+    record("broker certificate valid for > 30 days", days > 30, f"{days} days left")
 
 
 def check_git() -> None:
@@ -222,20 +256,26 @@ def check_git() -> None:
 
 
 async def main() -> None:
+    run_fault = "--no-fault" not in sys.argv
     s = get_settings()
     seed = load_seed()
     await check_compose()
+    check_certificate()
     conn = await asyncpg.connect(s.database_url.replace("postgresql+asyncpg://", "postgresql://"))
     try:
         await check_seed(conn)
         await check_series(conn, len(seed.devices) * 4)
+        window_start = snapshot(s)
         await check_aggregate(conn)
-        check_lag(http_get(f"http://127.0.0.1:{s.ingest_http_port}/metrics"))
         await check_duplicate(conn, s, seed)
         await check_bad_payload(s, seed)
         check_security(s, seed)
-        await check_rabbit(s)
-        await check_overheat(conn, s, seed)
+        await asyncio.sleep(max(0.0, WINDOW_S - (time.monotonic() - window_start[0])))
+        check_window(s, window_start)
+        if run_fault:
+            await check_overheat(conn, s, seed)
+        else:
+            print("[SKIP] overheat fault check (--no-fault)")
     finally:
         await conn.close()
     check_git()
