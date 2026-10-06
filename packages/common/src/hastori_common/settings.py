@@ -1,8 +1,10 @@
 import logging
+import os
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repository root, so scripts work from any directory (no effect inside the containers,
@@ -10,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT = Path(__file__).resolve().parents[4]
 
 DEFAULT_DEVICE_SECRET = "change-me-demo-device-secret"  # noqa: S105
+DEMO_CONTROL_TOKEN = "demo-control-token"  # noqa: S105
 
 log = logging.getLogger("settings")
 
@@ -23,6 +26,7 @@ class Settings(BaseSettings):
 
     mqtt_host: str = "127.0.0.1"
     mqtt_port: int = 8883
+    # Relative paths are resolved against the repository root, so scripts work from any directory.
     mqtt_ca_file: str = str(ROOT / "infra" / "mosquitto" / "certs" / "ca.crt")
     mqtt_ingestion_user: str = "ingestion"
     mqtt_ingestion_password: str = "ingestion_demo"
@@ -39,17 +43,56 @@ class Settings(BaseSettings):
     sim_seed: int = 42
     sim_control_port: int = 8002
     # Bearer token for the simulator's fault API (it can inject faults into every device).
-    sim_control_token: str = "demo-control-token"  # noqa: S105
+    sim_control_token: str = DEMO_CONTROL_TOKEN
     ingest_http_port: int = 8001
     # Stable id: the MQTT session (and the messages queued for it) belongs to this id.
     ingest_client_id: str = "ingestion-1"
     ingest_shutdown_deadline_s: float = 20.0
     log_level: str = "INFO"
 
+    @field_validator("mqtt_ca_file")
+    @classmethod
+    def _absolute_ca_path(cls, value: str) -> str:
+        path = Path(value)
+        return str(path if path.is_absolute() else ROOT / path)
+
+
+# Values that ship in the code or in .env.example. A service that is meant to run for real must
+# not start with them just because an environment variable went missing.
+_DEMO_VALUES: dict[str, tuple[str, ...]] = {
+    "database_url": ("hastori_demo",),
+    "mqtt_ingestion_password": ("ingestion_demo",),
+    "mqtt_health_password": ("health_demo",),
+    "mqtt_device_secret": (DEFAULT_DEVICE_SECRET,),
+    "rabbitmq_url": ("hastori_demo",),
+    "sim_control_token": (DEMO_CONTROL_TOKEN,),
+}
+
+
+def check_secrets(settings: Settings, fields: Iterable[str]) -> None:
+    """Raise if any of `fields` still holds a published demo value.
+
+    `ALLOW_DEMO_SECRETS=1` switches the check off (throwaway local runs and tests).
+    """
+    if os.environ.get("ALLOW_DEMO_SECRETS") == "1":
+        return
+    bad = [
+        f
+        for f in fields
+        if any(demo in str(getattr(settings, f)) for demo in _DEMO_VALUES.get(f, ()))
+    ]
+    if bad:
+        raise RuntimeError(
+            f"refusing to start with the published demo value for: {', '.join(bad)}. "
+            "Run `make env` to generate a .env with random secrets "
+            "(or set ALLOW_DEMO_SECRETS=1 for a throwaway run)."
+        )
+
 
 @lru_cache
-def get_settings() -> Settings:
+def get_settings(strict: tuple[str, ...] = ()) -> Settings:
+    """Settings from the environment. `strict` names the secrets this process really needs:
+    it refuses to start if one still has a demo value."""
     settings = Settings()
-    if settings.mqtt_device_secret == DEFAULT_DEVICE_SECRET:
-        log.warning("MQTT_DEVICE_SECRET is the public demo value; run `make env` for a random one")
+    check_secrets(settings, strict)
     return settings
