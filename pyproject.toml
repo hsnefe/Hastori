@@ -3,7 +3,7 @@ name = "hastori"
 version = "0.1.0"
 description = "Hastori: industrial telemetry platform (day-1 infrastructure)"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = ["hastori-common", "hastori-ingestion", "hastori-simulator"]
 
 [dependency-groups]
 dev = ["ruff>=0.6", "mypy>=1.11", "pytest>=8", "pytest-asyncio>=0.24", "types-PyYAML"]

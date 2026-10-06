@@ -70,6 +70,24 @@ services:
         condition: service_healthy
     restart: "no"
 
+  simulator:
+    profiles: ["sim"]
+    build:
+      context: .
+      dockerfile: services/simulator/Dockerfile
+    env_file: .env
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_CA_FILE: /certs/ca.crt
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - ./infra/mosquitto/certs/ca.crt:/certs/ca.crt:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
 volumes:
   tsdb-data:
   mosquitto-data:
