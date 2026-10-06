@@ -1,5 +1,6 @@
 name: hastori
 
+# Images are pinned to exact versions: a floating tag can change broker behaviour under you.
 services:
   timescaledb:
     image: timescale/timescaledb:2.17.2-pg17
@@ -19,31 +20,32 @@ services:
       retries: 20
 
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     environment:
       MQTT_HEALTH_USER: ${MQTT_HEALTH_USER}
-      MQTT_HEALTH_PASSWORD: ${MQTT_HEALTH_PASSWORD}
     ports:
       - "127.0.0.1:8883:8883"
     volumes:
       - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./infra/mosquitto/passwd:/mosquitto/config/passwd:ro
-      - ./infra/mosquitto/acl:/mosquitto/config/acl:ro
       - ./infra/mosquitto/certs:/mosquitto/certs:ro
+      # passwd + acl, written with the right owner and mode by `make mqtt-auth`
+      - mosquitto-auth:/mosquitto/auth:ro
       - mosquitto-data:/mosquitto/data
+    secrets:
+      - mqtt_health_password
     healthcheck:
       test:
         - CMD-SHELL
         - >-
           mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt
-          -u $$MQTT_HEALTH_USER -P $$MQTT_HEALTH_PASSWORD
+          -u $$MQTT_HEALTH_USER -P "$$(cat /run/secrets/mqtt_health_password)"
           -t '$$SYS/broker/uptime' -C 1 -W 3
       interval: 5s
       timeout: 5s
       retries: 20
 
   rabbitmq:
-    image: rabbitmq:4-management
+    image: rabbitmq:4.3.6-management
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
@@ -81,6 +83,11 @@ services:
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /certs/ca.crt
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      # The MQTT session lives under this id. A second replica needs its own stable id
+      # (ingestion-2, ...); a random id would strand its queued messages.
+      INGEST_CLIENT_ID: ingestion-1
+    # SIGTERM drains the queue (up to INGEST_SHUTDOWN_DEADLINE_S = 20 s) before exiting.
+    stop_grace_period: 40s
     ports:
       - "127.0.0.1:8001:8001"
     volumes:
@@ -117,7 +124,14 @@ services:
       mosquitto:
         condition: service_healthy
 
+secrets:
+  mqtt_health_password:
+    file: ./infra/mosquitto/health.pw
+
 volumes:
   tsdb-data:
   mosquitto-data:
   rabbitmq-data:
+  mosquitto-auth:
+    external: true
+    name: hastori_mosquitto-auth

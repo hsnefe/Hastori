@@ -1,12 +1,22 @@
-"""Generate the Mosquitto password and ACL files from seed/demo.yaml."""
+"""Generate Mosquitto credentials and ACLs from seed/demo.yaml.
+
+The password and ACL files go into the named volume `hastori_mosquitto-auth` with the owner and
+mode Mosquitto wants (0700 for the password file), instead of a bind mount from the host where
+the mode cannot be controlled on Windows. The plain-text intermediate exists only in a temporary
+directory for the duration of the call. The healthcheck password is written to a file that
+compose mounts as a secret, so it does not show up in `docker inspect`.
+"""
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 from hastori_common.seed_data import derive_device_password, load_seed
-from hastori_common.settings import get_settings
+from hastori_common.settings import ROOT, get_settings
 
-OUT = Path("infra/mosquitto")
+VOLUME = "hastori_mosquitto-auth"
+HEALTH_PW_FILE = ROOT / "infra" / "mosquitto" / "health.pw"
+IMAGE = "eclipse-mosquitto:2.1.2-alpine"
 
 
 def main() -> None:
@@ -19,7 +29,6 @@ def main() -> None:
     }
     acl: list[str] = [
         f"user {settings.mqtt_ingestion_user}",
-        "topic read $share/ingestion/sites/+/devices/+/telemetry",
         "topic read sites/+/devices/+/telemetry",
         "",
         f"user {settings.mqtt_health_user}",
@@ -30,29 +39,30 @@ def main() -> None:
         users[str(dev.id)] = derive_device_password(settings.mqtt_device_secret, dev.id)
         acl += [f"user {dev.id}", f"topic write {seed.topic(dev)}", ""]
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    passwd = OUT / "passwd"
-    passwd.write_text(
-        "".join(f"{u}:{p}\n" for u, p in users.items()), encoding="utf-8", newline="\n"
-    )
-    (OUT / "acl").write_text("\n".join(acl), encoding="utf-8", newline="\n")
+    HEALTH_PW_FILE.write_text(settings.mqtt_health_password, encoding="utf-8", newline="\n")
 
-    # Hash in place with mosquitto_passwd -U inside the broker image.
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{OUT.resolve()}:/work",
-            "eclipse-mosquitto:2",
-            "mosquitto_passwd",
-            "-U",
-            "/work/passwd",
-        ],
-        check=True,
-    )
-    print(f"wrote {len(users)} users to {OUT / 'passwd'} and ACL to {OUT / 'acl'}")
+    subprocess.run(["docker", "volume", "create", VOLUME], check=True, capture_output=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "passwd").write_text(
+            "".join(f"{u}:{p}\n" for u, p in users.items()), encoding="utf-8", newline="\n"
+        )
+        (tmp_path / "acl").write_text("\n".join(acl), encoding="utf-8", newline="\n")
+        # Hash in place with the broker's own tool, then fix owner and mode.
+        script = (
+            "cp /in/passwd /in/acl /out/ && chmod 0700 /out/passwd && chmod 0600 /out/acl"
+            " && mosquitto_passwd -U /out/passwd"
+            " && chown mosquitto:mosquitto /out/passwd /out/acl"
+        )
+        subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "-v", f"{tmp_path}:/in:ro", "-v", f"{VOLUME}:/out",
+                "--entrypoint", "sh", IMAGE, "-c", script,
+            ],
+            check=True,
+        )  # fmt: skip
+    print(f"wrote {len(users)} users and the ACL to volume {VOLUME}")
 
 
 if __name__ == "__main__":

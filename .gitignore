@@ -16,4 +16,5 @@ node_modules/
 infra/mosquitto/certs/
 infra/mosquitto/passwd
 infra/mosquitto/acl
+infra/mosquitto/health.pw
 .claude/

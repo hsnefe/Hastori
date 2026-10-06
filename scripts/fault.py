@@ -12,11 +12,15 @@ def main() -> None:
         sys.exit("usage: fault.py <device-key> <kind> [duration_s]")
     device, kind = sys.argv[1], sys.argv[2]
     duration = float(sys.argv[3]) if len(sys.argv) > 3 else 40.0
-    port = get_settings().sim_control_port
+    settings = get_settings()
+    port = settings.sim_control_port
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/faults",
         data=json.dumps({"device": device, "kind": kind, "duration_s": duration}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.sim_control_token}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=5) as resp:
