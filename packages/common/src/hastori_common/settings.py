@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[4]
 
 DEFAULT_DEVICE_SECRET = "change-me-demo-device-secret"  # noqa: S105
 DEMO_CONTROL_TOKEN = "demo-control-token"  # noqa: S105
+DEMO_JWT_SECRET = "change-me-demo-jwt-secret-0123456789abcdef"  # noqa: S105
 
 log = logging.getLogger("settings")
 
@@ -35,6 +36,16 @@ class Settings(BaseSettings):
     mqtt_device_secret: str = Field(default=DEFAULT_DEVICE_SECRET, min_length=8)
 
     rabbitmq_url: str = "amqp://hastori:hastori_demo@127.0.0.1:5672/"
+    redis_url: str = "redis://:redis_demo@127.0.0.1:6379/0"
+
+    # Signs the API's access tokens (HS256): anyone who knows it can mint a token for any user.
+    jwt_secret: str = Field(default=DEMO_JWT_SECRET, min_length=32)
+    access_token_ttl_s: int = 15 * 60
+    refresh_token_ttl_s: int = 7 * 24 * 3600
+    # An already used refresh token still works this long (parallel tabs); later it means theft.
+    refresh_grace_s: int = 20
+    # Secure cookies need HTTPS (browsers exempt localhost); switch on behind the gateway.
+    cookie_secure: bool = False
 
     seed_system_admin_password: str = "admin_demo_pw"
     seed_site_admin_password: str = "siteadmin_demo_pw"
@@ -45,6 +56,8 @@ class Settings(BaseSettings):
     # Bearer token for the simulator's fault API (it can inject faults into every device).
     sim_control_token: str = DEMO_CONTROL_TOKEN
     ingest_http_port: int = 8001
+    alarm_http_port: int = 8003
+    api_http_port: int = 8000
     # Stable id: the MQTT session (and the messages queued for it) belongs to this id.
     ingest_client_id: str = "ingestion-1"
     ingest_shutdown_deadline_s: float = 20.0
@@ -65,6 +78,8 @@ _DEMO_VALUES: dict[str, tuple[str, ...]] = {
     "mqtt_health_password": ("health_demo",),
     "mqtt_device_secret": (DEFAULT_DEVICE_SECRET,),
     "rabbitmq_url": ("hastori_demo",),
+    "redis_url": ("redis_demo",),
+    "jwt_secret": (DEMO_JWT_SECRET,),
     "sim_control_token": (DEMO_CONTROL_TOKEN,),
 }
 

@@ -12,4 +12,5 @@ node_modules
 infra/mosquitto/certs
 infra/mosquitto/ca-private
 infra/mosquitto/health.pw
+infra/redis/redis.pw
 tests

@@ -23,20 +23,25 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-VOLUMES = ("hastori_tsdb-data", "hastori_rabbitmq-data")
+VOLUMES = ("hastori_tsdb-data", "hastori_rabbitmq-data", "hastori_redis-data")
 SECRET_KEYS = (
     "POSTGRES_PASSWORD",
     "MQTT_INGESTION_PASSWORD",
     "MQTT_HEALTH_PASSWORD",
     "MQTT_DEVICE_SECRET",
     "RABBITMQ_PASSWORD",
+    "REDIS_PASSWORD",
+    "JWT_SECRET",
     "SIM_CONTROL_TOKEN",
 )
+# Compose reads the Redis password from a file (a secret), not from the environment.
+REDIS_SECRET_FILE = ROOT / "infra" / "redis" / "redis.pw"
 SEED_KEYS = ("SEED_SYSTEM_ADMIN_PASSWORD", "SEED_SITE_ADMIN_PASSWORD", "SEED_VIEWER_PASSWORD")
 
 
-def rand() -> str:
-    return secrets.token_hex(16)
+def rand(key: str = "") -> str:
+    # The JWT signing key is 64 hex characters (256 bits); the rest are 32.
+    return secrets.token_hex(32 if key == "JWT_SECRET" else 16)
 
 
 def existing_volumes() -> list[str]:
@@ -55,7 +60,7 @@ def parse(text: str) -> dict[str, str]:
 
 def build_new(template: str, public: bool) -> tuple[str, dict[str, str]]:
     keys = SECRET_KEYS + (SEED_KEYS if public else ())
-    values = {key: rand() for key in keys}
+    values = {key: rand(key) for key in keys}
     text = template
     for key, value in values.items():
         text = re.sub(rf"^{key}=.*$", f"{key}={value}", text, flags=re.M)
@@ -68,7 +73,18 @@ def build_new(template: str, public: bool) -> tuple[str, dict[str, str]]:
         "hastori:hastori_demo@127.0.0.1:5672",
         f"hastori:{values['RABBITMQ_PASSWORD']}@127.0.0.1:5672",
     )
+    text = text.replace(":redis_demo@127.0.0.1:6379", f":{values['REDIS_PASSWORD']}@127.0.0.1:6379")
     return text, values
+
+
+def write_redis_secret(env_text: str) -> None:
+    """infra/redis/redis.pw mirrors REDIS_PASSWORD (compose secret); rewritten on every run so
+    the two cannot drift apart."""
+    password = parse(env_text).get("REDIS_PASSWORD")
+    if not password:
+        return
+    REDIS_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REDIS_SECRET_FILE.write_text(password, encoding="utf-8", newline="\n")
 
 
 def main() -> None:
@@ -82,13 +98,22 @@ def main() -> None:
         have = parse(current)
         missing = {k: v for k, v in parse(template).items() if k not in have}
         if not missing:
+            write_redis_secret(current)
             print(f"{out} exists and is complete, leaving it alone")
             return
-        extra = "".join(f"{k}={rand() if k in SECRET_KEYS else v}\n" for k, v in missing.items())
+        fresh = {k: rand(k) for k in missing if k in SECRET_KEYS}
+        lines = []
+        for k, v in missing.items():
+            if k in fresh:
+                v = fresh[k]
+            elif k == "REDIS_URL":  # embeds the password: keep it consistent with REDIS_PASSWORD
+                password = fresh.get("REDIS_PASSWORD") or have["REDIS_PASSWORD"]
+                v = v.replace(":redis_demo@", f":{password}@")
+            lines.append(f"{k}={v}\n")
         sep = "" if current.endswith("\n") else "\n"
-        out.write_text(
-            f"{current}{sep}# added from .env.example\n{extra}", encoding="utf-8", newline="\n"
-        )
+        updated = f"{current}{sep}# added from .env.example\n{''.join(lines)}"
+        out.write_text(updated, encoding="utf-8", newline="\n")
+        write_redis_secret(updated)
         print(f"{out} exists; added missing keys: {', '.join(missing)}")
         return
 
@@ -102,6 +127,7 @@ def main() -> None:
         )
     text, values = build_new(template, public)
     out.write_text(text, encoding="utf-8", newline="\n")
+    write_redis_secret(text)
     print(f"wrote {out} with generated secrets")
     if public:
         for key in SEED_KEYS:

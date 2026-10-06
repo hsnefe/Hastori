@@ -8,12 +8,7 @@ from typing import Any
 import aio_pika
 from aio_pika.abc import AbstractExchange, AbstractRobustConnection
 
-from hastori_common.messaging import (
-    ALARM_BINDING,
-    ALARM_QUEUE,
-    ALARM_QUEUE_ARGS,
-    EXCHANGE,
-)
+from hastori_common.messaging import declare_topology
 from hastori_ingestion.metrics import PUBLISH_FAILURES
 
 log = logging.getLogger("ingestion.publisher")
@@ -57,15 +52,11 @@ class Publisher:
         try:
             self._conn = await aio_pika.connect_robust(self._url, timeout=5)
             self._channel = await self._conn.channel(publisher_confirms=True)
-            self._exchange = await self._channel.declare_exchange(
-                EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True
-            )
-            queue = await self._channel.declare_queue(
-                ALARM_QUEUE, durable=True, arguments=dict(ALARM_QUEUE_ARGS)
-            )
-            await queue.bind(self._exchange, routing_key=ALARM_BINDING)
+            self._exchange, _ = await declare_topology(self._channel)
             log.info("rabbitmq connected")
         except Exception as exc:
+            # PRECONDITION_FAILED here = the queue exists with older arguments:
+            # `make reset-alarm-queue`, then restart ingestion.
             log.warning("rabbitmq unavailable", extra={"error": str(exc)})
             self._conn = None
             self._channel = None

@@ -65,6 +65,37 @@ services:
       timeout: 10s
       retries: 20
 
+  redis:
+    image: redis:7.4.11-alpine
+    # The password is read from a compose secret, not an environment variable (`docker inspect`
+    # shows those). `user:` makes the image entrypoint skip its chown + privilege drop, which
+    # would need capabilities this container does not have.
+    user: "999:1000"
+    command:
+      - sh
+      - -c
+      - >-
+        exec redis-server --requirepass "$$(cat /run/secrets/redis_password)"
+        --appendonly yes --appendfsync everysec
+        --maxmemory 96mb --maxmemory-policy noeviction
+    secrets:
+      - redis_password
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 160m
+    restart: unless-stopped
+
   migrate:
     build:
       context: .
@@ -164,11 +195,14 @@ services:
 secrets:
   mqtt_health_password:
     file: ./infra/mosquitto/health.pw
+  redis_password:
+    file: ./infra/redis/redis.pw
 
 volumes:
   tsdb-data:
   mosquitto-data:
   rabbitmq-data:
+  redis-data:
   mosquitto-auth:
     external: true
     name: hastori_mosquitto-auth

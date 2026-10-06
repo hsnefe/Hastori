@@ -20,4 +20,5 @@ infra/mosquitto/ca-private/
 infra/mosquitto/passwd
 infra/mosquitto/acl
 infra/mosquitto/health.pw
+infra/redis/redis.pw
 .claude/

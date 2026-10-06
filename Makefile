@@ -1,4 +1,4 @@
-.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience test lint
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
@@ -55,10 +55,14 @@ smoke-quick:
 resilience:
 	uv run python scripts/resilience.py $(ARGS)
 
+# After an upgrade that changed the alarm queue's arguments (RabbitMQ refuses to redeclare it)
+reset-alarm-queue:
+	uv run python scripts/reset_alarm_queue.py
+
 test:
 	uv run pytest
 
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
-	uv run mypy packages services scripts
+	uv run mypy packages services scripts tests
