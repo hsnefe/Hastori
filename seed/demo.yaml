@@ -6,9 +6,11 @@ sites:
   - id: a4ed8030-5817-5372-b5fe-ec4601107c93
     key: izmir
     name: İzmir Fabrika
+    city: İzmir
   - id: 4fd66194-cbb6-5dfb-9995-cb36df30ab55
     key: antalya
     name: Antalya Otel
+    city: Antalya
 
 devices:
   - id: d4943984-3fe6-5de5-9b31-e5089627789e

@@ -22,6 +22,7 @@ class SiteSeed(BaseModel):
     id: UUID
     key: str
     name: str
+    city: str | None = None
 
 
 class DeviceSeed(BaseModel):

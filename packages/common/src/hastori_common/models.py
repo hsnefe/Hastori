@@ -48,6 +48,7 @@ class Site(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    city: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
     __table_args__ = (UniqueConstraint("org_id", "name"),)
 
@@ -79,7 +80,7 @@ class Device(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     mqtt_topic: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = _created()
     __table_args__ = (UniqueConstraint("site_id", "name"),)
 
@@ -108,9 +109,9 @@ class Alarm(Base):
     rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("alarm_rules.id"), nullable=False)
     device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id"), nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
-    triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    acknowledged_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     peak_value: Mapped[float | None] = mapped_column(Float)
     __table_args__ = (
@@ -127,9 +128,20 @@ class Alarm(Base):
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    at: Mapped[datetime] = _created()
+    created_at: Mapped[datetime] = _created()
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     action: Mapped[str] = mapped_column(Text, nullable=False)
     entity: Mapped[str | None] = mapped_column(Text)
     entity_id: Mapped[str | None] = mapped_column(Text)
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
+class Outbox(Base):
+    """Events committed together with measurements; a relay publishes them to RabbitMQ."""
+
+    __tablename__ = "outbox"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, nullable=False)
+    routing_key: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
