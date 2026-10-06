@@ -2,7 +2,9 @@
 
 By default it never overwrites what people changed in the running system: existing users keep
 their password hash and existing alarm rules keep their settings. `--reset` makes the YAML win
-again (demo reset): passwords are re-hashed from the environment and rules are restored.
+again (demo reset): passwords are re-hashed from the environment, rules are restored and the
+site assignments of the seeded users are reconciled. Users and devices that were removed from the
+YAML are never deleted (history and audit records reference them).
 """
 
 import argparse
@@ -11,7 +13,7 @@ import os
 from typing import Any
 
 from pwdlib import PasswordHash
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -40,7 +42,7 @@ def _upsert(table: Any, rows: list[dict[str, Any]], keep: set[str] | None = None
 
 
 async def main(reset: bool) -> None:
-    settings = get_settings()
+    settings = get_settings(strict=("database_url",))
     seed = load_seed()
     hasher = PasswordHash.recommended()
     org_id = seed.organization.id
@@ -96,6 +98,13 @@ async def main(reset: bool) -> None:
         await conn.execute(_upsert(User, users, keep=set() if reset else {"password_hash"}))
         if user_sites:
             await conn.execute(insert(UserSite).values(user_sites).on_conflict_do_nothing())
+        if reset:
+            # YAML wins: a seeded user keeps only the sites the YAML gives them.
+            wanted = [(r["user_id"], r["site_id"]) for r in user_sites]
+            stale: ColumnElement[bool] = UserSite.user_id.in_([u["id"] for u in users])
+            if wanted:
+                stale = and_(stale, tuple_(UserSite.user_id, UserSite.site_id).not_in(wanted))
+            await conn.execute(delete(UserSite).where(stale))
         await conn.execute(_upsert(Device, devices, keep={"is_active"}))
         if reset:
             await conn.execute(_upsert(AlarmRule, rules))

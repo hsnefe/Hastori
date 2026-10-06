@@ -65,6 +65,16 @@ users:
     role: viewer
     password_env: SEED_VIEWER_PASSWORD
     sites: [izmir]
+  - id: 84415262-82a2-496e-b943-58c884a62832
+    email: antalya.admin@demo.hastori.local
+    role: site_admin
+    password_env: SEED_SITE_ADMIN_PASSWORD
+    sites: [antalya]
+  - id: b6c20c31-07a9-401b-8260-cfbb5e81596b
+    email: antalya.izleyici@demo.hastori.local
+    role: viewer
+    password_env: SEED_VIEWER_PASSWORD
+    sites: [antalya]
 
 alarm_rules:
   - id: aee4e4e5-1bfd-591f-8f6c-0eeb2bc846b1

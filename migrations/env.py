@@ -10,7 +10,9 @@ from hastori_common.models import Base
 from hastori_common.settings import get_settings
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+config.set_main_option(
+    "sqlalchemy.url", get_settings(strict=("database_url",)).database_url.replace("%", "%%")
+)
 target_metadata = Base.metadata
 
 _TIMESCALE_SCHEMAS = {
@@ -34,7 +36,12 @@ def include_object(
 
 def _run(connection: Connection) -> None:
     context.configure(
-        connection=connection, target_metadata=target_metadata, include_object=include_object
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+        # Each revision commits (and is stamped) on its own: if a later one fails, the earlier
+        # ones stay applied and a rerun resumes instead of colliding with half-created objects.
+        transaction_per_migration=True,
     )
     with context.begin_transaction():
         context.run_migrations()

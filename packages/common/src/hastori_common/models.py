@@ -63,6 +63,7 @@ class User(Base):
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
         CheckConstraint("role IN ('system_admin','site_admin','viewer')", name="ck_users_role"),
+        Index("uq_users_email_lower", text("lower(email)"), unique=True),
     )
 
 
@@ -100,6 +101,17 @@ class AlarmRule(Base):
     __table_args__ = (
         CheckConstraint("operator IN ('>','<')", name="ck_rules_operator"),
         CheckConstraint("severity IN ('warning','critical')", name="ck_rules_severity"),
+        CheckConstraint("duration_s >= 0", name="ck_rules_duration"),
+        CheckConstraint(
+            "metric IN ('active_power_kw','reactive_power_kvar','current_a','temperature_c')",
+            name="ck_rules_metric",
+        ),
+        CheckConstraint(
+            "clear_threshold IS NULL OR (operator = '>' AND clear_threshold <= threshold)"
+            " OR (operator = '<' AND clear_threshold >= threshold)",
+            name="ck_rules_clear",
+        ),
+        Index("ix_alarm_rules_device", "device_id"),
     )
 
 
@@ -122,6 +134,8 @@ class Alarm(Base):
             unique=True,
             postgresql_where=text("state IN ('active','acknowledged')"),
         ),
+        Index("ix_alarms_device_opened", "device_id", text("opened_at DESC")),
+        Index("ix_alarms_state", "state", postgresql_where=text("state <> 'cleared'")),
     )
 
 
@@ -134,6 +148,7 @@ class AuditLog(Base):
     entity: Mapped[str | None] = mapped_column(Text)
     entity_id: Mapped[str | None] = mapped_column(Text)
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    __table_args__ = (Index("ix_audit_log_created", text("created_at DESC")),)
 
 
 class Outbox(Base):

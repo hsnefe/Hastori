@@ -5,7 +5,7 @@ def test_seed_shape() -> None:
     seed = load_seed()
     assert len(seed.sites) == 2
     assert len(seed.devices) == 7
-    assert len(seed.users) == 3
+    assert len(seed.users) == 5
     assert len(seed.alarm_rules) == 2
     assert len({seed.topic(d) for d in seed.devices}) == 7
 
