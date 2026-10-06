@@ -1,4 +1,4 @@
-from prometheus_client import CollectorRegistry, Counter, Histogram
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 REGISTRY = CollectorRegistry()
 
@@ -18,4 +18,12 @@ BATCH_SIZE = Histogram(
 )
 PUBLISH_FAILURES = Counter(
     "ingest_publish_failures", "RabbitMQ publish failures", registry=REGISTRY
+)
+OUTBOX_DEPTH = Gauge(
+    "ingest_outbox_depth", "Events committed but not yet published", registry=REGISTRY
+)
+OUTBOX_EXPIRED = Counter(
+    "ingest_outbox_expired",
+    "Outbox events dropped after exceeding their max age",
+    registry=REGISTRY,
 )

@@ -47,7 +47,7 @@ def test_topic_rejected(topic: str) -> None:
 
 def test_valid_payload() -> None:
     ts, metrics = parse_payload(payload(), NOW)
-    assert ts == int(NOW)
+    assert ts == NOW
     assert metrics == {"active_power_kw": 12.5, "temperature_c": 61.0}
 
 
@@ -79,6 +79,12 @@ def test_bad_shapes() -> None:
     assert reason(payload(ts="now")) == "invalid_payload"
     assert reason(payload(metrics={})) == "invalid_payload"
     assert reason(payload(metrics={"current_a": "3"})) == "bad_value"
+
+
+def test_fractional_timestamps_keep_millisecond_resolution() -> None:
+    ts, _ = parse_payload(payload(ts=NOW + 0.1234), NOW)
+    assert ts == NOW + 0.123
+    assert message_id(DEV, NOW + 0.1) != message_id(DEV, NOW + 0.6)
 
 
 def test_message_id_is_deterministic() -> None:

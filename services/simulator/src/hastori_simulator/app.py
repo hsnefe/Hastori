@@ -1,6 +1,7 @@
 """Simulator runtime: one MQTT connection per device plus a fault control API."""
 
 import asyncio
+import hmac
 import json
 import logging
 import time
@@ -9,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import aiomqtt
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from hastori_common.logging import configure_logging
@@ -54,7 +55,7 @@ class Simulator:
             for key, metrics in readings.items():
                 if self.models[key].is_offline(now):
                     continue
-                payload = json.dumps({"ts": int(round(now)), "metrics": metrics}).encode()
+                payload = json.dumps({"ts": round(now, 3), "metrics": metrics}).encode()
                 q = self.queues[key]
                 if q.full():
                     q.get_nowait()  # drop oldest while the broker is unreachable
@@ -97,8 +98,12 @@ class Simulator:
                 backoff = min(BACKOFF_MAX_S, backoff * 2)
 
 
-def build_api(sim: Simulator) -> FastAPI:
-    api = FastAPI(title="Hastori simulator control")
+def build_api(sim: Simulator, token: str) -> FastAPI:
+    def require_token(authorization: str = Header(default="")) -> None:
+        if not hmac.compare_digest(authorization, f"Bearer {token}"):
+            raise HTTPException(401, "missing or wrong bearer token")
+
+    api = FastAPI(title="Hastori simulator control", dependencies=[Depends(require_token)])
 
     def _status(key: str) -> dict[str, object]:
         f = sim.models[key].fault
@@ -143,7 +148,10 @@ async def run() -> None:
     sim = Simulator(load_seed(), settings)
     # Bind all interfaces inside the container; compose publishes the port on 127.0.0.1 only.
     config = uvicorn.Config(
-        build_api(sim), host="0.0.0.0", port=settings.sim_control_port, log_level="warning"
+        build_api(sim, settings.sim_control_token),
+        host="0.0.0.0",
+        port=settings.sim_control_port,
+        log_level="warning",
     )
     tasks = [
         asyncio.create_task(sim.tick_loop()),

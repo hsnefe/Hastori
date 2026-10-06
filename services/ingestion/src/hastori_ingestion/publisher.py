@@ -1,18 +1,23 @@
-"""RabbitMQ publishing (topic exchange, publisher confirms). Failures are counted, never fatal."""
+"""RabbitMQ publishing for the outbox relay (topic exchange, publisher confirms, mandatory)."""
 
-import json
 import logging
 import time
+from collections.abc import Sequence
+from typing import Any
 
 import aio_pika
 from aio_pika.abc import AbstractExchange, AbstractRobustConnection
 
+from hastori_common.messaging import (
+    ALARM_BINDING,
+    ALARM_QUEUE,
+    ALARM_QUEUE_ARGS,
+    EXCHANGE,
+)
 from hastori_ingestion.metrics import PUBLISH_FAILURES
-from hastori_ingestion.parsing import Telemetry
 
 log = logging.getLogger("ingestion.publisher")
 
-EXCHANGE = "hastori.telemetry"
 RECONNECT_COOLDOWN_S = 5.0
 
 
@@ -40,6 +45,10 @@ class Publisher:
             self._exchange = await channel.declare_exchange(
                 EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True
             )
+            queue = await channel.declare_queue(
+                ALARM_QUEUE, durable=True, arguments=dict(ALARM_QUEUE_ARGS)
+            )
+            await queue.bind(self._exchange, routing_key=ALARM_BINDING)
             log.info("rabbitmq connected")
         except Exception as exc:
             log.warning("rabbitmq unavailable", extra={"error": str(exc)})
@@ -47,35 +56,34 @@ class Publisher:
             self._exchange = None
         return self._exchange
 
-    async def publish(self, items: list[Telemetry]) -> None:
+    async def publish_rows(self, rows: Sequence[Any]) -> list[int]:
+        """Publish outbox rows in order; returns the ids that the broker confirmed.
+
+        Stops at the first failure so ordering is kept and the rest stays in the outbox.
+        """
         exchange = await self._ensure()
         if exchange is None:
-            PUBLISH_FAILURES.inc(len(items))
-            return
-        for t in items:
-            body = json.dumps(
-                {
-                    "message_id": str(t.message_id),
-                    "site_id": str(t.site_id),
-                    "device_id": str(t.device_id),
-                    "ts": t.ts,
-                    "metrics": t.metrics,
-                }
-            ).encode()
+            PUBLISH_FAILURES.inc(len(rows))
+            return []
+        done: list[int] = []
+        for row in rows:
             msg = aio_pika.Message(
-                body,
-                message_id=str(t.message_id),
+                row["body"].encode(),
+                message_id=str(row["message_id"]),
                 content_type="application/json",
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             )
             try:
-                await exchange.publish(msg, routing_key=f"telemetry.{t.site_id}.{t.device_id}")
+                await exchange.publish(msg, routing_key=row["routing_key"], mandatory=True)
             except Exception as exc:
                 PUBLISH_FAILURES.inc()
                 log.warning(
                     "publish failed",
-                    extra={"message_id": str(t.message_id), "error": str(exc)},
+                    extra={"message_id": str(row["message_id"]), "error": str(exc)},
                 )
+                break
+            done.append(row["id"])
+        return done
 
     async def close(self) -> None:
         if self._conn is not None and not self._conn.is_closed:

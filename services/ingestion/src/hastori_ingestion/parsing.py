@@ -30,7 +30,7 @@ class Rejected(Exception):
 class Telemetry:
     site_id: uuid.UUID
     device_id: uuid.UUID
-    ts: int
+    ts: float
     metrics: dict[str, float]
     message_id: uuid.UUID
 
@@ -46,11 +46,12 @@ def parse_topic(topic: str) -> tuple[uuid.UUID, uuid.UUID]:
         raise Rejected("bad_topic") from None
 
 
-def message_id(device_id: uuid.UUID, ts: int) -> uuid.UUID:
-    return uuid.uuid5(device_id, str(ts))
+def message_id(device_id: uuid.UUID, ts: float) -> uuid.UUID:
+    """Deterministic id: the same device reading always maps to the same id (ms resolution)."""
+    return uuid.uuid5(device_id, f"{ts:.3f}")
 
 
-def parse_payload(raw: bytes | str, now: float) -> tuple[int, dict[str, float]]:
+def parse_payload(raw: bytes | str, now: float) -> tuple[float, dict[str, float]]:
     """Validate a payload; returns (ts, metrics) or raises Rejected."""
     try:
         data: Any = json.loads(raw)
@@ -84,10 +85,10 @@ def parse_payload(raw: bytes | str, now: float) -> tuple[int, dict[str, float]]:
         if not lo <= value <= hi:
             raise Rejected("out_of_range", name)
         clean[name] = float(value)
-    return int(round(ts)), clean
+    return round(float(ts), 3), clean
 
 
 def build_telemetry(
-    site_id: uuid.UUID, device_id: uuid.UUID, ts: int, metrics: dict[str, float]
+    site_id: uuid.UUID, device_id: uuid.UUID, ts: float, metrics: dict[str, float]
 ) -> Telemetry:
     return Telemetry(site_id, device_id, ts, metrics, message_id(device_id, ts))
