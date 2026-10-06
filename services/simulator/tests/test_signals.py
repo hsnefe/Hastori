@@ -145,3 +145,23 @@ def test_default_overheat_trips_the_demo_rule() -> None:
     for s in range(5):
         above = _longest_run_above(rule.threshold, s)
         assert above >= rule.duration_s + 6, (s, above, rule.duration_s)
+
+
+def test_compensation_failure_ends_with_its_duration() -> None:
+    """The reactive-ratio alarm can only clear if the fault itself ends."""
+    devices = _site()
+    pano = devices[0]
+    now = T0
+    for _ in range(10):
+        sample_site(devices, now, HOUR)
+        now += 2
+    pano.set_fault("compensation_failure", now, 20)
+
+    def ratio(at: float) -> float:
+        m = sample_site(devices, at, HOUR)["izmir-pano"]
+        return m["reactive_power_kvar"] / m["active_power_kw"]
+
+    during = [ratio(now + i * 2) for i in range(10)]  # first 20 s
+    after = [ratio(now + 20 + i * 2) for i in range(10)]
+    assert all(r > 0.3 for r in during)
+    assert all(r < 0.2 for r in after)

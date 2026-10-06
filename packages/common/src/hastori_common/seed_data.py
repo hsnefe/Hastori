@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 import yaml
@@ -23,6 +24,7 @@ class SiteSeed(BaseModel):
     key: str
     name: str
     city: str | None = None
+    timezone: str = "Europe/Istanbul"
 
 
 class DeviceSeed(BaseModel):
@@ -49,8 +51,10 @@ class RuleSeed(BaseModel):
     operator: str
     threshold: float
     duration_s: int
-    clear_threshold: float | None
+    clear_threshold: float
     severity: str
+    kind: Literal["threshold", "reactive_ratio"] = "threshold"
+    window_s: int | None = None
 
 
 class SeedData(BaseModel):

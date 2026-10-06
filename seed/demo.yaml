@@ -93,5 +93,29 @@ alarm_rules:
     operator: ">"
     threshold: 90
     duration_s: 60
-    clear_threshold: null
+    clear_threshold: 85
+    severity: warning
+  # Reactive / active energy over a sliding 10 minute window (demo assumption: 0.18 warns, below
+  # 0.165 it clears). The simulator's normal tan(phi) is 0.12-0.16; compensation_failure is 0.35.
+  - id: 5909e820-fdfa-5bae-9b6d-6edd7c1eeb6b
+    device: izmir-pano
+    name: İzmir pano reaktif oran
+    kind: reactive_ratio
+    metric: reactive_power_kvar
+    operator: ">"
+    threshold: 0.18
+    duration_s: 0
+    clear_threshold: 0.165
+    window_s: 600
+    severity: warning
+  - id: 6ad6a3cc-9e3e-55f0-a86f-cec03f3814a1
+    device: antalya-pano
+    name: Antalya pano reaktif oran
+    kind: reactive_ratio
+    metric: reactive_power_kvar
+    operator: ">"
+    threshold: 0.18
+    duration_s: 0
+    clear_threshold: 0.165
+    window_s: 600
     severity: warning

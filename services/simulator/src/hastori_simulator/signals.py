@@ -14,7 +14,9 @@ FAULT_KINDS: tuple[str, ...] = ("overheat", "spike", "compensation_failure", "of
 
 # Default length of an injected fault. The overheat ramp crosses 80 C after ~16 s, so a shorter
 # fault cannot satisfy the 30 s alarm rule of the demo (test_default_overheat_trips_the_demo_rule).
-DEFAULT_FAULT_S = 60.0
+# Long enough for the demo: the overheat opens the 30 s alarm rule after ~46 s and the alarm then
+# stays open for over a minute, which leaves time to acknowledge it.
+DEFAULT_FAULT_S = 120.0
 
 VOLTAGE_V = 400.0
 SQRT3 = math.sqrt(3.0)
@@ -134,10 +136,11 @@ class DeviceModel:
             base = 0.0
         return max(0.0, base * (1.0 + self.rng.gauss(0.0, NOISE_FRACTION)))
 
-    def _drift_tan_phi(self) -> float:
+    def _drift_tan_phi(self, now: float) -> float:
         lo, hi = TAN_PHI_NORMAL
         self.tan_phi = min(hi, max(lo, self.tan_phi + self.rng.gauss(0.0, 0.002)))
-        if self.fault and self.fault.kind == "compensation_failure":
+        f = self.fault
+        if f and f.kind == "compensation_failure" and f.active(now):
             return TAN_PHI_FAILED
         return self.tan_phi
 
@@ -179,7 +182,7 @@ class DeviceModel:
             if self.type == "energy_analyzer" and panel_p_kw is not None
             else (self.device_power(now, hour))
         )
-        tan_phi = self._drift_tan_phi()
+        tan_phi = self._drift_tan_phi(now)
         temp = self._advance_temperature(now, p)
         self.last_time = now
         self.last_p_kw = p

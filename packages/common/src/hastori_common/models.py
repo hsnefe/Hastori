@@ -49,6 +49,10 @@ class Site(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     city: Mapped[str | None] = mapped_column(Text)
+    # IANA name; the day boundary of the daily consumption.
+    timezone: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'Europe/Istanbul'")
+    )
     created_at: Mapped[datetime] = _created()
     __table_args__ = (UniqueConstraint("org_id", "name"),)
 
@@ -95,8 +99,14 @@ class AlarmRule(Base):
     operator: Mapped[str] = mapped_column(Text, nullable=False)
     threshold: Mapped[float] = mapped_column(Float, nullable=False)
     duration_s: Mapped[int] = mapped_column(Integer, nullable=False)
-    clear_threshold: Mapped[float | None] = mapped_column(Float)
+    # Mandatory: the alarm clears only below it, which keeps a value that hovers at the threshold
+    # from opening and closing the alarm over and over.
+    clear_threshold: Mapped[float] = mapped_column(Float, nullable=False)
     severity: Mapped[str] = mapped_column(Text, nullable=False)
+    # threshold: one measured value against a limit. reactive_ratio: reactive / active energy over
+    # a sliding window of window_s seconds (energy analyzers only).
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'threshold'"))
+    window_s: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     __table_args__ = (
         CheckConstraint("operator IN ('>','<')", name="ck_rules_operator"),
@@ -111,7 +121,26 @@ class AlarmRule(Base):
             " OR (operator = '<' AND clear_threshold >= threshold)",
             name="ck_rules_clear",
         ),
+        CheckConstraint("kind IN ('threshold','reactive_ratio')", name="ck_rules_kind"),
+        CheckConstraint(
+            "(kind = 'reactive_ratio' AND window_s IS NOT NULL AND window_s BETWEEN 60 AND 3600)"
+            " OR (kind = 'threshold' AND window_s IS NULL)",
+            name="ck_rules_window",
+        ),
+        CheckConstraint(
+            "kind <> 'reactive_ratio' OR (metric = 'reactive_power_kvar' AND operator = '>')",
+            name="ck_rules_reactive",
+        ),
         Index("ix_alarm_rules_device", "device_id"),
+        # One enabled rule per device, metric and kind: no warning + critical pair for one event.
+        Index(
+            "uq_rules_device_metric_kind",
+            "device_id",
+            "metric",
+            "kind",
+            unique=True,
+            postgresql_where=text("enabled"),
+        ),
     )
 
 

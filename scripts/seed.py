@@ -86,6 +86,8 @@ async def main(reset: bool) -> None:
             "duration_s": r.duration_s,
             "clear_threshold": r.clear_threshold,
             "severity": r.severity,
+            "kind": r.kind,
+            "window_s": r.window_s,
         }
         for r in seed.alarm_rules
     ]
@@ -93,8 +95,18 @@ async def main(reset: bool) -> None:
     engine = create_async_engine(settings.database_url)
     async with engine.begin() as conn:
         await conn.execute(_upsert(Organization, [{"id": org_id, "name": seed.organization.name}]))
-        sites = [{"id": s.id, "org_id": org_id, "name": s.name, "city": s.city} for s in seed.sites]
-        await conn.execute(_upsert(Site, sites))
+        sites = [
+            {
+                "id": s.id,
+                "org_id": org_id,
+                "name": s.name,
+                "city": s.city,
+                "timezone": s.timezone,
+            }
+            for s in seed.sites
+        ]
+        # The time zone can be changed through the API; a plain re-seed must not undo that.
+        await conn.execute(_upsert(Site, sites, keep=set() if reset else {"timezone"}))
         await conn.execute(_upsert(User, users, keep=set() if reset else {"password_hash"}))
         if user_sites:
             await conn.execute(insert(UserSite).values(user_sites).on_conflict_do_nothing())

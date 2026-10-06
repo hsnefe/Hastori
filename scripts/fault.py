@@ -1,7 +1,7 @@
 """Trigger a simulator fault: python scripts/fault.py <device-key> <kind> [duration_s].
 
-The default duration is 60 s: the overheat reaches 80 C after ~16 s and the demo alarm rule wants
-30 s above it.
+The default duration is 120 s: the overheat reaches 80 C after ~16 s, the demo alarm rule wants
+30 s above it, and the alarm then stays open for over a minute so it can be acknowledged.
 """
 
 import json

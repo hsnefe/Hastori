@@ -2,8 +2,8 @@
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
-# Long enough for the 30 s alarm rule: the overheat ramp takes ~16 s to cross 80 C.
-DURATION ?= 60
+# Long enough for the 30 s alarm rule (the ramp takes ~16 s to cross 80 C) plus time to acknowledge.
+DURATION ?= 120
 
 env:
 	uv run python scripts/gen_env.py
@@ -65,4 +65,4 @@ test:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
-	uv run mypy packages services scripts tests
+	uv run mypy packages services scripts tests conftest.py
