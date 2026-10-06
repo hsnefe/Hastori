@@ -7,6 +7,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from redis.exceptions import BusyLoadingError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = logging.getLogger("api")
@@ -20,6 +25,7 @@ _CODES = {
     409: "conflict",
     422: "validation_error",
     429: "too_many_requests",
+    503: "unavailable",
 }
 
 
@@ -100,6 +106,24 @@ def install_error_handlers(app: FastAPI) -> None:
     async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         details = [{"loc": [str(p) for p in e["loc"]], "msg": str(e["msg"])} for e in exc.errors()]
         return _response(422, "validation_error", "Invalid request", details=details)
+
+    # A dependency that is down is not a bug in a request: say so (503) and when to try again,
+    # instead of an anonymous 500. Only connection-level failures are mapped; an error in a query
+    # or a script is still a 500 and shows up in the log.
+    @app.exception_handler(RedisConnectionError)
+    @app.exception_handler(RedisTimeoutError)
+    @app.exception_handler(BusyLoadingError)
+    @app.exception_handler(OperationalError)
+    @app.exception_handler(InterfaceError)
+    @app.exception_handler(PoolTimeoutError)
+    async def dependency_down(request: Request, exc: Exception) -> JSONResponse:
+        log.error(
+            "dependency unavailable", extra={"path": request.url.path, "error": str(exc)[:200]}
+        )
+        return _response(
+            503, "unavailable", "A backing service is unavailable; try again shortly",
+            headers={"Retry-After": "5"},
+        )  # fmt: skip
 
     @app.exception_handler(Exception)
     async def unexpected(request: Request, exc: Exception) -> JSONResponse:

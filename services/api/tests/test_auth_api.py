@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 import jwt
+import pytest
 
 from conftest import DEMO_USERS, ApiHarness
 from hastori_api.security import issue_access_token
@@ -259,3 +260,39 @@ async def test_health_endpoints(api: ApiHarness) -> None:
         assert ready.status_code == 200 and ready.json() == {"db": True, "redis": True}
     finally:
         await root.aclose()
+
+
+async def test_a_dead_redis_is_a_503_not_a_500(api: ApiHarness) -> None:
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    async def down(*a: Any, **k: Any) -> Any:
+        raise RedisConnectionError("redis is gone")
+
+    limiter = api.app.state.limiter
+    original = limiter.blocked_for
+    limiter.blocked_for = down  # the login limiter needs Redis
+    try:
+        r = await login(api.client())
+    finally:
+        limiter.blocked_for = original
+    assert r.status_code == 503 and r.headers["retry-after"] == "5"
+    assert r.json()["error"]["code"] == "unavailable"
+    assert "redis" not in r.text.lower()  # no internals
+
+
+async def test_a_dead_database_is_a_503_not_a_500(
+    api: ApiHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    from hastori_api.queries import sites
+
+    c = await api.signed_in("izmir_viewer")  # signed in while everything works
+
+    async def down(*a: Any, **k: Any) -> Any:
+        raise OperationalError("SELECT 1", {}, ConnectionRefusedError("connection refused"))
+
+    monkeypatch.setattr(sites, "list_sites", down)
+    r = await c.get("/sites")
+    assert r.status_code == 503 and r.headers["retry-after"] == "5"
+    assert r.json()["error"]["code"] == "unavailable" and "refused" not in r.text
