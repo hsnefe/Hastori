@@ -1,0 +1,19 @@
+[project]
+name = "hastori-ingestion"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "hastori-common",
+  "aiomqtt>=2.3",
+  "aio-pika>=9.4",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "prometheus-client>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hastori_ingestion"]

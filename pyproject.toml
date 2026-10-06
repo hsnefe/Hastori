@@ -1,0 +1,39 @@
+[project]
+name = "hastori"
+version = "0.1.0"
+description = "Hastori: industrial telemetry platform (day-1 infrastructure)"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["ruff>=0.6", "mypy>=1.11", "pytest>=8", "pytest-asyncio>=0.24", "types-PyYAML"]
+
+[tool.uv.workspace]
+members = ["packages/common", "services/ingestion", "services/simulator"]
+
+[tool.uv.sources]
+hastori-common = { workspace = true }
+hastori-ingestion = { workspace = true }
+hastori-simulator = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+explicit_package_bases = true
+mypy_path = "packages/common/src:services/ingestion/src:services/simulator/src"
+
+[[tool.mypy.overrides]]
+module = ["aiomqtt.*", "aio_pika.*", "pwdlib.*", "asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages", "services", "tests"]
