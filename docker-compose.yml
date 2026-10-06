@@ -194,6 +194,36 @@ services:
       retries: 10
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      API_HTTP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 384m
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   simulator:
     profiles: ["sim"]
     build:

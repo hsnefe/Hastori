@@ -1,0 +1,16 @@
+FROM python:3.12.15-slim
+COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /usr/local/bin/uv
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
+COPY pyproject.toml uv.lock ./
+COPY packages/common packages/common
+# uv needs every workspace member's manifest to resolve the lock file, not its source
+COPY services/ingestion/pyproject.toml services/ingestion/pyproject.toml
+COPY services/simulator/pyproject.toml services/simulator/pyproject.toml
+COPY services/alarm/pyproject.toml services/alarm/pyproject.toml
+COPY services/api services/api
+RUN uv sync --frozen --no-dev --package hastori-api
+# Unprivileged: nothing in here needs root at run time.
+RUN useradd --system --uid 10001 --no-create-home app
+USER 10001
+CMD ["python", "-m", "hastori_api"]

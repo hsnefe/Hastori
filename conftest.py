@@ -169,3 +169,65 @@ def load_script(name: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# -- the API, in process ----------------------------------------------------------------------
+
+DEMO_USERS = {
+    "admin": ("admin@demo.hastori.local", "admin-test-password"),
+    "izmir_admin": ("izmir.admin@demo.hastori.local", "siteadmin-test-password"),
+    "izmir_viewer": ("izmir.izleyici@demo.hastori.local", "viewer-test-password"),
+    "antalya_admin": ("antalya.admin@demo.hastori.local", "siteadmin-test-password"),
+    "antalya_viewer": ("antalya.izleyici@demo.hastori.local", "viewer-test-password"),
+}
+
+
+class ApiHarness:
+    """The real application (real PostgreSQL, Redis with Lua) served in process."""
+
+    def __init__(self, app: Any, engine: Any, redis: Any, dsn: str) -> None:
+        self.app, self.engine, self.redis, self.dsn = app, engine, redis, dsn
+        self._clients: list[Any] = []
+
+    def client(self) -> Any:
+        """A client with its own cookie jar, like another browser."""
+        import httpx
+
+        c = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="http://test/api/v1"
+        )
+        self._clients.append(c)
+        return c
+
+    async def signed_in(self, who: str) -> Any:
+        """A client that has logged in as one of the demo users (bearer token + refresh cookie)."""
+        email, password = DEMO_USERS[who]
+        c = self.client()
+        r = await c.post("/auth/login", json={"email": email, "password": password})
+        assert r.status_code == 200, r.text
+        c.headers["Authorization"] = f"Bearer {r.json()['access_token']}"
+        c.token = r.json()["access_token"]
+        return c
+
+    async def close(self) -> None:
+        for c in self._clients:
+            await c.aclose()
+        await self.engine.dispose()
+
+
+@pytest.fixture
+async def api(use_database: str, fake_redis: Any) -> AsyncIterator[ApiHarness]:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from hastori_api.app import create_app
+    from hastori_common.settings import Settings
+
+    await load_script("seed").main(reset=False)
+    url = use_database.replace("postgresql://", "postgresql+asyncpg://", 1)
+    engine = create_async_engine(url)
+    settings = Settings(_env_file=None, database_url=url, jwt_secret="t" * 40)  # type: ignore[call-arg]
+    harness = ApiHarness(create_app(settings, engine, fake_redis), engine, fake_redis, use_database)
+    try:
+        yield harness
+    finally:
+        await harness.close()
