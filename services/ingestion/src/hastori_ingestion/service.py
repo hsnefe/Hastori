@@ -15,7 +15,9 @@ import contextlib
 import json
 import logging
 import signal
+import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -47,10 +49,14 @@ log = logging.getLogger("ingestion")
 SHARED_TOPIC = "$share/ingestion/sites/+/devices/+/telemetry"
 QUEUE_SIZE = 10_000
 CACHE_REFRESH_S = 60.0
+# The broker keeps a session's queue this long; parsing.MAX_AGE_S must cover it.
 SESSION_EXPIRY_S = 3600
 BACKOFF_MAX_S = 30.0
 OUTBOX_BATCH = 500
 OUTBOX_MAX_AGE = "1 hour"
+RELAY_TIMEOUT_S = 60.0
+DB_COMMAND_TIMEOUT_S = 30.0
+REJECT_LOG_INTERVAL_S = 10.0
 
 INSERT_SQL = (
     "INSERT INTO measurements (time, device_id, metric, value) VALUES ($1, $2, $3, $4) "
@@ -61,16 +67,19 @@ OUTBOX_SQL = (
     "ON CONFLICT (message_id) DO NOTHING"
 )
 
-# Errors that say "try again later" (connection, restart, lock/serialization, resources).
-# Every other asyncpg.PostgresError is a property of the data itself.
-TRANSIENT_DB_ERRORS: tuple[type[BaseException], ...] = (
+# Only these say "this row is the problem" (SQLSTATE class 22 data exception, class 23 integrity
+# violation). Everything else the database can raise (missing table after a bad migration, wrong
+# password, read-only replica after a failover, ...) is a property of the environment and is
+# retried: dropping and acking the messages would turn an outage into silent data loss.
+PERMANENT_DB_ERRORS: tuple[type[BaseException], ...] = (
+    asyncpg.exceptions.DataError,
+    asyncpg.exceptions.IntegrityConstraintViolationError,
+)
+RETRYABLE_DB_ERRORS: tuple[type[BaseException], ...] = (
     OSError,
     TimeoutError,
     asyncpg.InterfaceError,
-    asyncpg.exceptions.PostgresConnectionError,
-    asyncpg.exceptions.OperatorInterventionError,
-    asyncpg.exceptions.TransactionRollbackError,
-    asyncpg.exceptions.InsufficientResourcesError,
+    asyncpg.PostgresError,
 )
 
 _STOP = object()
@@ -112,6 +121,8 @@ class Ingestion:
         self.devices_changed = asyncio.Event()
         self._drained = False
         self.deadline: float | None = None
+        self.tasks: list[asyncio.Task[Any]] = []
+        self._reject_logged: dict[str, float] = {}
 
     # -- device cache -----------------------------------------------------------------------
     async def refresh_devices(self) -> None:
@@ -123,23 +134,28 @@ class Ingestion:
     async def cache_loop(self, dsn: str) -> None:
         """Refresh on `devices_changed` notifications, and at least every CACHE_REFRESH_S."""
         listener: asyncpg.Connection | None = None
-        while True:
-            if listener is None or listener.is_closed():
+        try:
+            while True:
+                if listener is None or listener.is_closed():
+                    try:
+                        listener = await asyncpg.connect(dsn, timeout=10)
+                        await listener.add_listener(
+                            "devices_changed", lambda *_: self.devices_changed.set()
+                        )
+                    except (OSError, asyncpg.PostgresError, TimeoutError) as exc:
+                        listener = None
+                        log.warning("device listener unavailable", extra={"error": str(exc)})
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.devices_changed.wait(), CACHE_REFRESH_S)
+                self.devices_changed.clear()
                 try:
-                    listener = await asyncpg.connect(dsn)
-                    await listener.add_listener(
-                        "devices_changed", lambda *_: self.devices_changed.set()
-                    )
-                except (OSError, asyncpg.PostgresError) as exc:
-                    listener = None
-                    log.warning("device listener unavailable", extra={"error": str(exc)})
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.devices_changed.wait(), CACHE_REFRESH_S)
-            self.devices_changed.clear()
-            try:
-                await self.refresh_devices()
-            except Exception as exc:
-                log.warning("device cache refresh failed", extra={"error": str(exc)})
+                    await self.refresh_devices()
+                except Exception as exc:
+                    log.warning("device cache refresh failed", extra={"error": str(exc)})
+        finally:
+            if listener is not None and not listener.is_closed():
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(listener.close(timeout=2))
 
     # -- MQTT -> queue ----------------------------------------------------------------------
     def check_message(self, topic: str, payload: bytes, now: float) -> Telemetry:
@@ -181,14 +197,25 @@ class Ingestion:
                 item = self.check_message(topic, payload, time.time())
         except Rejected as exc:
             metrics.REJECTED.labels(reason=exc.reason).inc()
-            log.warning(
-                "message rejected",
-                extra={"reason": exc.reason, "detail": exc.detail, "topic": topic},
-            )
+            self._log_rejected(exc, topic)
             self.ack([receipt])  # nothing to store: do not let the broker redeliver it
             return
         metrics.MESSAGES.inc()
         await self.queue.put(Pending(item, message.mid, message.qos, self.generation))
+
+    def _log_rejected(self, exc: Rejected, topic: str) -> None:
+        """One WARNING per reason every REJECT_LOG_INTERVAL_S; the counter has the exact number.
+        A device flooding bad messages must not flood the log as well."""
+        now = time.monotonic()
+        last = self._reject_logged.get(exc.reason)
+        if last is not None and now - last < REJECT_LOG_INTERVAL_S:
+            return
+        self._reject_logged[exc.reason] = now
+        log.warning(
+            "message rejected (logged at most once per %.0f s per reason)",
+            REJECT_LOG_INTERVAL_S,
+            extra={"reason": exc.reason, "detail": exc.detail, "topic": topic},
+        )
 
     async def _read(self, client: aiomqtt.Client) -> None:
         async for message in client.messages:
@@ -213,9 +240,13 @@ class Ingestion:
                     clean_start=False,
                     properties=props,
                     tls_params=aiomqtt.TLSParameters(ca_certs=s.mqtt_ca_file),
+                    # Bounded even if a device ignores QoS 1 and floods; QoS 1 is limited by the
+                    # broker's in-flight window anyway.
+                    max_queued_incoming_messages=QUEUE_SIZE,
                 ) as client:
                     client._client.manual_ack_set(True)
                     self.generation += 1
+                    metrics.MQTT_CONNECTS.inc()
                     self._client = client
                     await client.subscribe(SHARED_TOPIC, qos=1)
                     self.state.mqtt = True
@@ -301,16 +332,18 @@ class Ingestion:
             await conn.executemany(OUTBOX_SQL, events)
 
     async def _commit(self, batch: list[Pending]) -> bool:
-        """Commit with retries on transient errors. False = gave up because we are shutting
-        down past the deadline (the messages stay un-acked and the broker redelivers them).
-        Permanent database errors propagate."""
+        """Commit with retries on every database error except PERMANENT_DB_ERRORS. False = gave
+        up because we are shutting down past the deadline (the messages stay un-acked and the
+        broker redelivers them). Permanent errors propagate."""
         backoff = 0.5
         while True:
             try:
                 await self._write(batch)
                 self.state.db = True
                 return True
-            except TRANSIENT_DB_ERRORS as exc:
+            except PERMANENT_DB_ERRORS:
+                raise
+            except RETRYABLE_DB_ERRORS as exc:
                 self.state.db = False
                 if self._expired():
                     log.error("shutdown deadline: leaving batch un-acked", extra={"n": len(batch)})
@@ -325,7 +358,7 @@ class Ingestion:
             if not await self._commit(batch):
                 return
             good = batch
-        except asyncpg.PostgresError as exc:
+        except PERMANENT_DB_ERRORS as exc:
             # The batch contains a row the database refuses for good (e.g. a device deleted
             # behind the cache). Find it: commit one by one, drop only the offenders.
             log.warning("batch refused, retrying row by row", extra={"error": str(exc)})
@@ -334,7 +367,7 @@ class Ingestion:
                 try:
                     if await self._commit([p]):
                         good.append(p)
-                except asyncpg.PostgresError as one:
+                except PERMANENT_DB_ERRORS as one:
                     metrics.REJECTED.labels(reason="db_rejected").inc()
                     log.warning(
                         "message dropped by database",
@@ -354,26 +387,33 @@ class Ingestion:
 
     # -- outbox -> RabbitMQ -----------------------------------------------------------------
     async def relay_once(self) -> bool:
-        """Publish one batch of outbox rows; True if more may be waiting."""
+        """Publish one batch of outbox rows; True if more may be waiting.
+
+        No database transaction (and so no row lock) is held while talking to RabbitMQ: a stalled
+        broker (memory/disk alarm) must not pin a connection or block vacuum. If two replicas
+        publish the same row, the consumer drops the duplicate by message id.
+        """
         assert self.pool is not None
-        async with self.pool.acquire() as conn, conn.transaction():
-            expired = await conn.execute(
-                f"DELETE FROM outbox WHERE created_at < now() - interval '{OUTBOX_MAX_AGE}'"  # noqa: S608
-            )
-            n_expired = int(expired.split()[-1])
-            if n_expired:
-                metrics.OUTBOX_EXPIRED.inc(n_expired)
-                log.error("outbox events expired", extra={"n": n_expired})
-            rows = await conn.fetch(
-                "SELECT id, message_id, routing_key, body FROM outbox "
-                "ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED",
-                OUTBOX_BATCH,
-            )
-            done = await self.publisher.publish_rows(rows) if rows else []
-            if done:
-                await conn.execute("DELETE FROM outbox WHERE id = ANY($1::bigint[])", done)
-            metrics.OUTBOX_DEPTH.set(await conn.fetchval("SELECT count(*) FROM outbox"))
-            return len(rows) == OUTBOX_BATCH and len(done) == len(rows)
+        expired = await self.pool.execute(
+            f"DELETE FROM outbox WHERE created_at < now() - interval '{OUTBOX_MAX_AGE}'"  # noqa: S608
+        )
+        n_expired = int(expired.split()[-1])
+        if n_expired:
+            metrics.OUTBOX_EXPIRED.inc(n_expired)
+            log.error("outbox events expired", extra={"n": n_expired})
+        rows = await self.pool.fetch(
+            "SELECT id, message_id, routing_key, body FROM outbox ORDER BY id LIMIT $1",
+            OUTBOX_BATCH,
+        )
+        done = (
+            await asyncio.wait_for(self.publisher.publish_rows(rows), RELAY_TIMEOUT_S)
+            if rows
+            else []
+        )
+        if done:
+            await self.pool.execute("DELETE FROM outbox WHERE id = ANY($1::bigint[])", done)
+        metrics.OUTBOX_DEPTH.set(await self.pool.fetchval("SELECT count(*) FROM outbox"))
+        return len(rows) == OUTBOX_BATCH and len(done) == len(rows)
 
     async def relay_loop(self) -> None:
         while True:
@@ -383,7 +423,7 @@ class Ingestion:
             try:
                 while await self.relay_once():
                     pass
-            except (*TRANSIENT_DB_ERRORS, asyncpg.PostgresError) as exc:
+            except RETRYABLE_DB_ERRORS as exc:
                 log.warning("outbox relay failed", extra={"error": str(exc)})
                 await asyncio.sleep(1.0)
 
@@ -404,7 +444,13 @@ def build_api(app: Ingestion) -> FastAPI:
     api = FastAPI(title="Hastori ingestion")
 
     @api.get("/healthz")
-    def healthz() -> dict[str, str]:
+    def healthz(response: Response) -> dict[str, str]:
+        """Liveness: every background loop is still running. A loop that died leaves the process
+        looking alive while nothing is processed; failing here lets the orchestrator restart it."""
+        dead = [t.get_name() for t in app.tasks if t.done() and not app.stop_event.is_set()]
+        if dead:
+            response.status_code = 503
+            return {"status": "failing", "dead": ",".join(dead)}
         return {"status": "ok"}
 
     @api.get("/readyz")
@@ -425,8 +471,24 @@ def build_api(app: Ingestion) -> FastAPI:
     return api
 
 
+class Server(uvicorn.Server):
+    """uvicorn without its own signal handling.
+
+    By default uvicorn installs SIGTERM/SIGINT handlers, stops the HTTP server first and
+    re-raises the signal afterwards, so /healthz and /metrics are already gone while the queue
+    drains. Here the service owns the signals and closes HTTP last.
+    """
+
+    def install_signal_handlers(self) -> None:
+        return None
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
 async def run() -> None:
-    settings = get_settings()
+    settings = get_settings(strict=("database_url", "mqtt_ingestion_password", "rabbitmq_url"))
     configure_logging(settings.log_level)
     app = Ingestion(settings)
     dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
@@ -434,25 +496,35 @@ async def run() -> None:
     backoff = 1.0
     while app.pool is None:  # DB may still be starting; compose also waits for migrate
         try:
-            app.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+            app.pool = await asyncpg.create_pool(
+                dsn,
+                min_size=1,
+                max_size=4,
+                command_timeout=DB_COMMAND_TIMEOUT_S,
+                server_settings={"idle_in_transaction_session_timeout": "60000"},
+            )
             await app.refresh_devices()
             app.state.db = True
         except (asyncpg.PostgresError, OSError) as exc:
             log.warning("db not ready", extra={"error": str(exc)})
+            if app.pool is not None:
+                await app.pool.close()
+                app.pool = None
             await asyncio.sleep(backoff)
             backoff = min(BACKOFF_MAX_S, backoff * 2)
     log.info("devices loaded", extra={"count": len(app.devices)})
 
-    server = uvicorn.Server(
+    server = Server(
         uvicorn.Config(
             build_api(app), host="0.0.0.0", port=settings.ingest_http_port, log_level="warning"
         )
     )
-    http_task = asyncio.create_task(server.serve())
-    cache_task = asyncio.create_task(app.cache_loop(dsn))
-    writer_task = asyncio.create_task(app.writer_loop())
-    relay_task = asyncio.create_task(app.relay_loop())
-    sub_task = asyncio.create_task(app.subscriber_loop())
+    http_task = asyncio.create_task(server.serve(), name="http")
+    cache_task = asyncio.create_task(app.cache_loop(dsn), name="cache")
+    writer_task = asyncio.create_task(app.writer_loop(), name="writer")
+    relay_task = asyncio.create_task(app.relay_loop(), name="relay")
+    sub_task = asyncio.create_task(app.subscriber_loop(), name="subscriber")
+    app.tasks = [http_task, cache_task, writer_task, relay_task, sub_task]
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -460,7 +532,22 @@ async def run() -> None:
             loop.add_signal_handler(sig, app.stop_event.set)
         except NotImplementedError:  # Windows
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(app.stop_event.set))
-    await app.stop_event.wait()
+
+    # Watch the loops: if one dies (a bug, an unexpected exception) the process would otherwise
+    # keep looking alive while nothing is processed. Exit non-zero so the restart policy
+    # applies; everything not yet acked is redelivered by the broker.
+    stopper = asyncio.create_task(app.stop_event.wait())
+    done, _ = await asyncio.wait({stopper, *app.tasks}, return_when=asyncio.FIRST_COMPLETED)
+    if stopper not in done:
+        for t in done:
+            failure = None if t.cancelled() else t.exception()
+            log.critical(
+                "background task %s ended unexpectedly, exiting", t.get_name(), exc_info=failure
+            )
+        for t in app.tasks:
+            t.cancel()
+        await asyncio.gather(*app.tasks, return_exceptions=True)
+        sys.exit(1)
 
     log.info("shutting down: draining queue")
     await sub_task  # stops reading, writes the queue out, acks, disconnects

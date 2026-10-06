@@ -11,4 +11,7 @@ RUN uv sync --frozen --no-dev --package hastori-ingestion
 COPY alembic.ini ./
 COPY migrations migrations
 COPY seed seed
+# Unprivileged: nothing in here needs root at run time.
+RUN useradd --system --uid 10001 --no-create-home app
+USER 10001
 CMD ["python", "-m", "hastori_ingestion"]

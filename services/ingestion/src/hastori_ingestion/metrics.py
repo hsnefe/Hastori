@@ -27,3 +27,8 @@ OUTBOX_EXPIRED = Counter(
     "Outbox events dropped after exceeding their max age",
     registry=REGISTRY,
 )
+MQTT_CONNECTS = Counter(
+    "ingest_mqtt_connects",
+    "MQTT connections established (a jump means session churn)",
+    registry=REGISTRY,
+)

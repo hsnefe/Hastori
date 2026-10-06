@@ -19,33 +19,48 @@ from hastori_ingestion.metrics import PUBLISH_FAILURES
 log = logging.getLogger("ingestion.publisher")
 
 RECONNECT_COOLDOWN_S = 5.0
+# A broker under a memory/disk alarm blocks publishers instead of refusing them; without a
+# timeout the relay would wait for it indefinitely.
+PUBLISH_TIMEOUT_S = 5.0
 
 
 class Publisher:
     def __init__(self, url: str) -> None:
         self._url = url
         self._conn: AbstractRobustConnection | None = None
+        self._channel: Any = None
         self._exchange: AbstractExchange | None = None
         self._last_attempt = 0.0
 
     @property
     def connected(self) -> bool:
-        return self._conn is not None and not self._conn.is_closed and self._exchange is not None
+        """Really connected now. A robust connection is only `is_closed` after an explicit
+        close(); while it is reconnecting after a broker outage its `connected` event is clear."""
+        conn = self._conn
+        return (
+            conn is not None
+            and conn.connected.is_set()
+            and self._channel is not None
+            and not self._channel.is_closed
+            and self._exchange is not None
+        )
 
     async def _ensure(self) -> AbstractExchange | None:
         if self.connected:
             return self._exchange
+        if self._conn is not None and not self._conn.is_closed:
+            return None  # the robust connection is reconnecting by itself; do not open a second
         now = time.monotonic()
         if now - self._last_attempt < RECONNECT_COOLDOWN_S:
             return None
         self._last_attempt = now
         try:
             self._conn = await aio_pika.connect_robust(self._url, timeout=5)
-            channel = await self._conn.channel(publisher_confirms=True)
-            self._exchange = await channel.declare_exchange(
+            self._channel = await self._conn.channel(publisher_confirms=True)
+            self._exchange = await self._channel.declare_exchange(
                 EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True
             )
-            queue = await channel.declare_queue(
+            queue = await self._channel.declare_queue(
                 ALARM_QUEUE, durable=True, arguments=dict(ALARM_QUEUE_ARGS)
             )
             await queue.bind(self._exchange, routing_key=ALARM_BINDING)
@@ -53,6 +68,7 @@ class Publisher:
         except Exception as exc:
             log.warning("rabbitmq unavailable", extra={"error": str(exc)})
             self._conn = None
+            self._channel = None
             self._exchange = None
         return self._exchange
 
@@ -62,7 +78,7 @@ class Publisher:
         Stops at the first failure so ordering is kept and the rest stays in the outbox.
         """
         exchange = await self._ensure()
-        if exchange is None:
+        if exchange is None or not self.connected:
             PUBLISH_FAILURES.inc(len(rows))
             return []
         done: list[int] = []
@@ -74,7 +90,12 @@ class Publisher:
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             )
             try:
-                await exchange.publish(msg, routing_key=row["routing_key"], mandatory=True)
+                await exchange.publish(
+                    msg,
+                    routing_key=row["routing_key"],
+                    mandatory=True,
+                    timeout=PUBLISH_TIMEOUT_S,
+                )
             except Exception as exc:
                 PUBLISH_FAILURES.inc()
                 log.warning(
