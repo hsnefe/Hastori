@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     mqtt_ca_file: str = "infra/mosquitto/certs/ca.crt"
     mqtt_ingestion_user: str = "ingestion"
     mqtt_ingestion_password: str = "ingestion_demo"
+    mqtt_health_user: str = "healthcheck"
+    mqtt_health_password: str = "health_demo"
     mqtt_device_secret: str = Field(default="change-me-demo-device-secret", min_length=8)
 
     rabbitmq_url: str = "amqp://hastori:hastori_demo@127.0.0.1:5672/"

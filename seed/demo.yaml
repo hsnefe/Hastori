@@ -1,0 +1,85 @@
+organization:
+  id: 59fbacea-144f-5254-a748-cc65385f1ddd
+  name: Demo Sanayi A.Ş.
+
+sites:
+  - id: a4ed8030-5817-5372-b5fe-ec4601107c93
+    key: izmir
+    name: İzmir Fabrika
+  - id: 4fd66194-cbb6-5dfb-9995-cb36df30ab55
+    key: antalya
+    name: Antalya Otel
+
+devices:
+  - id: d4943984-3fe6-5de5-9b31-e5089627789e
+    key: izmir-pano
+    site: izmir
+    name: Ana pano analizörü
+    type: energy_analyzer
+  - id: 7ab905f9-d9ef-507b-8d22-cc60f1179a5c
+    key: izmir-komp-1
+    site: izmir
+    name: Kompresör-1
+    type: compressor
+  - id: 50b9e9e9-7b29-512f-b5c8-b4b7eb8e3e4f
+    key: izmir-komp-2
+    site: izmir
+    name: Kompresör-2
+    type: compressor
+  - id: 6a77a3fc-80ef-522d-a808-bd161dfd9198
+    key: izmir-sogutma-1
+    site: izmir
+    name: Soğutma-1
+    type: chiller
+  - id: b1abbdfe-757e-576a-9c00-211a7929e952
+    key: antalya-pano
+    site: antalya
+    name: Ana pano analizörü
+    type: energy_analyzer
+  - id: c7d8211d-eb1c-5d25-8c5c-9adbd543acff
+    key: antalya-sogutma-1
+    site: antalya
+    name: Soğutma-1
+    type: chiller
+  - id: 0b185aa9-47f5-5341-aa5e-f0dedd1b6720
+    key: antalya-komp-1
+    site: antalya
+    name: Kompresör-1
+    type: compressor
+
+users:
+  - id: 052dcf6d-d699-5e33-b5bc-c9702cc752d0
+    email: admin@demo.hastori.local
+    role: system_admin
+    password_env: SEED_SYSTEM_ADMIN_PASSWORD
+    sites: []
+  - id: 258ef77e-dfb7-50b9-9038-e352b416a122
+    email: izmir.admin@demo.hastori.local
+    role: site_admin
+    password_env: SEED_SITE_ADMIN_PASSWORD
+    sites: [izmir]
+  - id: 6a05d415-8fd9-54d5-8d5b-5be95e00bea5
+    email: izmir.izleyici@demo.hastori.local
+    role: viewer
+    password_env: SEED_VIEWER_PASSWORD
+    sites: [izmir]
+
+alarm_rules:
+  - id: aee4e4e5-1bfd-591f-8f6c-0eeb2bc846b1
+    device: izmir-komp-1
+    name: Kompresör-1 yüksek sıcaklık
+    metric: temperature_c
+    operator: ">"
+    threshold: 80
+    duration_s: 30
+    clear_threshold: 75
+    severity: critical
+  - id: 77c48eb7-b09c-5ef5-b817-fbdc1f116eab
+    device: izmir-sogutma-1
+    name: Soğutma-1 yüksek akım
+    metric: current_a
+    operator: ">"
+    threshold: 90
+    duration_s: 60
+    clear_threshold: null
+    severity: warning
