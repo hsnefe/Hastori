@@ -377,3 +377,114 @@ async def test_at_shutdown_a_dead_database_leaves_the_message_unacked(
     # redelivers it after the restart, when the replay rebuilds the state from stored data.
     assert [m.acked for m in msgs] == [True] * 15 + [False]
     assert issubclass(Stopping, Exception)
+
+
+# -- the loops around the engine --------------------------------------------------------------
+
+
+async def test_a_rule_change_in_the_database_reaches_the_running_service(
+    seeded: asyncpg.Pool, fake_redis: Redis, db_dsn: str
+) -> None:
+    """LISTEN alarm_rules_changed -> reload: no restart, no polling interval to wait for."""
+    svc = await new_service(seeded, fake_redis)
+    await svc.startup()
+    tasks = [
+        asyncio.create_task(svc.listen_loop(db_dsn)),
+        asyncio.create_task(svc.reload_loop()),
+    ]
+    try:
+        await asyncio.sleep(0.5)  # the listener connects and does its first reload
+        t0 = time.time()
+        for i in range(25):
+            await svc.handle(cast(Any, telemetry(t0 + i * STEP, 85.0)))
+        assert (await alarms(seeded))[0]["state"] == "active"
+
+        changed = time.monotonic()
+        await seeded.execute("UPDATE alarm_rules SET enabled = false WHERE id = $1", RULE.id)
+        for _ in range(60):
+            if (await alarms(seeded))[0]["state"] == "cleared":
+                break
+            await asyncio.sleep(0.1)
+        took = time.monotonic() - changed
+        assert (await alarms(seeded))[0]["state"] == "cleared"
+        assert took < 3.0  # a notification and a 0.2 s settle, not the 60 s safety-net reload
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class FakeQueue:
+    """The part of an aio-pika queue `_consume` uses: `iterator()` as an async context manager."""
+
+    def __init__(self) -> None:
+        self.inbox: asyncio.Queue[Any] = asyncio.Queue()
+        self.closed = False
+
+    def iterator(self) -> "FakeQueue":
+        return self
+
+    async def __aenter__(self) -> "FakeQueue":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.closed = True
+
+    def __aiter__(self) -> "FakeQueue":
+        return self
+
+    async def __anext__(self) -> Any:
+        return await self.inbox.get()
+
+
+async def test_the_consumer_handles_messages_in_order_and_stops_when_asked(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    svc = await new_service(seeded, fake_redis)
+    await svc.startup()
+    queue = FakeQueue()
+    t0 = time.time()
+    sent = [telemetry(t0 + i * STEP, 85.0) for i in range(20)]
+    for m in sent:
+        queue.inbox.put_nowait(m)
+
+    consumer = asyncio.create_task(svc._consume(cast(Any, queue)))
+    for _ in range(100):
+        if all(m.acked for m in sent):
+            break
+        await asyncio.sleep(0.05)
+    assert all(m.acked for m in sent)
+    assert [a["state"] for a in await alarms(seeded)] == ["active"]  # in order: it opened once
+
+    svc.stop_event.set()  # idle, waiting for the next message: stops at once
+    await asyncio.wait_for(consumer, timeout=2)
+    assert queue.closed  # the iterator (and so the consumer on the broker) was closed
+
+
+async def test_a_message_in_hand_is_finished_before_the_consumer_stops(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    svc = await new_service(seeded, fake_redis)
+    await svc.startup()
+    queue = FakeQueue()
+    started, release = asyncio.Event(), asyncio.Event()
+    real_handle = svc.handle
+
+    async def slow(message: Any) -> None:
+        started.set()
+        await release.wait()  # the shutdown arrives while this message is being processed
+        await real_handle(message)
+
+    svc.handle = slow  # type: ignore[method-assign]
+    msg = telemetry(time.time(), 70.0)
+    queue.inbox.put_nowait(msg)
+    consumer = asyncio.create_task(svc._consume(cast(Any, queue)))
+    await asyncio.wait_for(started.wait(), 2)
+
+    svc.stop_event.set()
+    await asyncio.sleep(0.2)
+    assert not consumer.done() and not msg.acked  # not cut off in the middle
+    release.set()
+    await asyncio.wait_for(consumer, timeout=2)
+    assert msg.acked  # finished and acked, then the consumer left
+    assert queue.closed
