@@ -22,3 +22,10 @@ infra/mosquitto/acl
 infra/mosquitto/health.pw
 infra/redis/redis.pw
 .claude/
+
+# Next.js
+web/.next/
+web/out/
+web/next-env.d.ts
+web/*.tsbuildinfo
+!web/.env.development
