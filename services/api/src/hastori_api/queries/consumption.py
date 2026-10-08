@@ -34,7 +34,7 @@ DAILY_SQL = text(
                 CAST(:ends AS timestamptz[])) AS d(day, start_utc, end_utc)
     JOIN measurements_1m m ON m.bucket >= d.start_utc AND m.bucket < d.end_utc
     JOIN devices dev ON dev.id = m.device_id
-    WHERE dev.site_id = :site AND dev.type = 'energy_analyzer'
+    WHERE dev.site_id = :site AND dev.type = 'energy_analyzer' AND dev.is_active
       AND m.bucket >= :first_start AND m.bucket < :last_end
     GROUP BY d.day
     """

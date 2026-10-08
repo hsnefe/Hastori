@@ -332,6 +332,23 @@ async def test_the_consumption_of_one_site_never_includes_another(api: ApiHarnes
     assert all(d.kwh == 0 for d in antalya.days)
 
 
+async def test_an_inactive_panel_is_neither_summed_nor_counted_for_coverage(
+    api: ApiHarness,
+) -> None:
+    """The kWh and the coverage must be about the same set of panels: an old, deactivated panel
+    in the sum would make a day with a hole look complete."""
+    await put_panel_minutes(api, NOW - timedelta(minutes=120), NOW - timedelta(minutes=60))
+    before = await daily(api, "izmir_viewer", NOW)
+    await sql(
+        api,
+        "UPDATE devices SET is_active = false WHERE site_id = $1 AND type = 'energy_analyzer'",
+        IZMIR.id,
+    )
+    after = await daily(api, "izmir_viewer", NOW)
+    assert before.days and any(d.kwh > 0 for d in before.days)
+    assert after.days == []  # no active panel: nothing to sum, nothing to be complete about
+
+
 async def test_a_site_without_a_main_panel_has_no_consumption(api: ApiHarness) -> None:
     admin = await api.signed_in("admin")
     site = (await admin.post("/sites", json={"name": "Boş Depo"})).json()
