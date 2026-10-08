@@ -2,14 +2,36 @@
 #   /api/*  (REST and the WebSocket at /api/v1/ws)  ->  the API
 #   everything else                                 ->  the Next.js server
 # One origin: the browser's refresh cookie (SameSite=Strict, Path=/api/v1/auth) is first-party and
-# the WebSocket needs no CORS. TLS, rate limits, the real client address and COOKIE_SECURE come in
-# the same file on day 4, when this listens on a public address.
+# the WebSocket needs no CORS. TLS, rate limits and COOKIE_SECURE come in the same file on day 4,
+# when this listens on a public address (stock Caddy has no rate limiter: that needs an xcaddy
+# build with mholt/caddy-ratelimit; until then the API limits sign-in by e-mail and address).
 
 {
 	admin off
 	auto_https off
 	# Wait for open connections (WebSockets) this long on a reload or stop; the clients reconnect.
 	grace_period 10s
+
+	# The real client address, for the API's sign-in limiter. Private ranges are trusted proxies
+	# (cloudflared on this host or network, another Caddy); the client is taken from
+	# CF-Connecting-IP (Cloudflare Tunnel) or else X-Forwarded-For. A browser that talks to
+	# 127.0.0.1:8080 directly is a "private" peer too and could therefore claim any address: fine
+	# on a developer machine, not an exposed port (put the tunnel in front, publish nothing else).
+	servers {
+		trusted_proxies static private_ranges
+		client_ip_headers CF-Connecting-IP X-Forwarded-For
+	}
+
+	# Errors and runtime messages carry the request URI too: keep the ticket out of those as well.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			request>uri query {
+				delete ticket
+			}
+		}
+	}
 }
 
 :8080 {

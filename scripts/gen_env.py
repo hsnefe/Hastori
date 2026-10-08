@@ -85,6 +85,12 @@ def private(path: Path) -> None:
         path.chmod(0o600)
 
 
+def set_key(env_text: str, key: str, value: str) -> str:
+    if re.search(rf"^{key}=", env_text, flags=re.M):
+        return re.sub(rf"^{key}=.*$", f"{key}={value}", env_text, flags=re.M)
+    return f"{env_text.rstrip()}\n{key}={value}\n"
+
+
 def rotate_seed_passwords(env_text: str) -> tuple[str, dict[str, str]]:
     """New random SEED_* passwords inside an existing .env (`--public` on a stack that is
     already set up). The database still holds the old hashes until `make seed-reset`."""
@@ -124,6 +130,8 @@ def main() -> None:
             for key in SEED_KEYS:
                 print(f"  {key}={values[key]}")
             print("Run `make seed-reset` so the database takes them over.")
+            current = set_key(current, "API_DOCS", "false")  # no Swagger on a public address
+            out.write_text(current, encoding="utf-8", newline="\n")
         have = parse(current)
         missing = {k: v for k, v in parse(template).items() if k not in have}
         if not missing:
@@ -156,6 +164,8 @@ def main() -> None:
             "scratch (deletes all data), or pass --force."
         )
     text, values = build_new(template, public)
+    if public:
+        text = set_key(text, "API_DOCS", "false")
     out.write_text(text, encoding="utf-8", newline="\n")
     private(out)
     write_redis_secret(text)
