@@ -225,8 +225,34 @@ def test_exactly_sixty_seconds_behind_is_a_jump() -> None:
     e = engine_with()
     samples = temps([70.0] * 5)
     run(e, samples)
-    run(e, [Sample(DEVICE, samples[-1].ts - 60.0, {"temperature_c": 70.0})])
-    assert e.clock_jumps == 1
+    behind = samples[-1].ts - 62.0  # the confirming sample lands exactly 60 s behind
+    run(e, [Sample(DEVICE, behind, {"temperature_c": 70.0})])
+    assert e.clock_jumps == 0  # one sample alone is only a candidate
+    run(e, [Sample(DEVICE, behind + 2.0, {"temperature_c": 70.0})])
+    assert e.clock_jumps == 1  # the next one continues from it: the clock really moved
+
+
+def test_one_wrong_timestamp_does_not_wipe_a_pending_alarm() -> None:
+    """A single bad reading must not restart the device's timeline: that would drop a
+    half-counted duration."""
+    e = engine_with()
+    samples = temps([85.0] * 10)  # breaching, 20 s into a 30 s duration
+    run(e, samples)
+    assert e.phase_of(rule().id) is Phase.PENDING
+    run(e, [Sample(DEVICE, samples[-1].ts - 3600.0, {"temperature_c": 20.0})])
+    follow = temps([85.0] * 10, start=samples[-1].ts + 2.0)
+    out = run(e, follow)
+    assert e.clock_jumps == 0
+    assert any(t.kind == "opened" for t in out)  # the count carried on and completed
+
+
+def test_two_unrelated_old_timestamps_are_not_a_jump() -> None:
+    e = engine_with()
+    samples = temps([70.0] * 10)
+    run(e, samples)
+    run(e, [Sample(DEVICE, samples[-1].ts - 3600.0, {"temperature_c": 70.0})])
+    run(e, [Sample(DEVICE, samples[-1].ts - 7200.0, {"temperature_c": 70.0})])
+    assert e.clock_jumps == 0
 
 
 def test_a_redelivered_old_message_is_a_duplicate_not_a_jump() -> None:
@@ -269,7 +295,15 @@ def test_the_jump_restarts_a_reactive_window() -> None:
         ],
     )
     assert e.clock_jumps == 0
-    run(e, [Sample(DEVICE, T0 - 3600, {"active_power_kw": 10.0, "reactive_power_kvar": 1.0})])
+    for i in range(2):  # a candidate and the sample that confirms it
+        run(
+            e,
+            [
+                Sample(
+                    DEVICE, T0 - 3600 + i * 2, {"active_power_kw": 10.0, "reactive_power_kvar": 1.0}
+                )
+            ],
+        )
     assert e.clock_jumps == 1
 
 

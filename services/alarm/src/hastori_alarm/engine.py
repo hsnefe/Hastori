@@ -17,7 +17,9 @@ stream. Acknowledging an alarm is not a state here: an acknowledged alarm is sti
 A device clock that is set back while the device keeps running is the exception: every new sample
 would look older than the newest one and be dropped as a duplicate, so the alarm would be blind
 until the clock caught up again. A sample CLOCK_JUMP_S or more behind the newest one that is not a
-known duplicate therefore restarts that device's sequence (`clock_jumps` counts them).
+known duplicate is a candidate; the next sample must continue from it (within CLOCK_JUMP_CONFIRM_S)
+before the device's sequence restarts (`clock_jumps` counts them). One wrong timestamp on its own
+would otherwise wipe a half-counted duration, a clear hold and the reactive window.
 """
 
 import math
@@ -35,6 +37,8 @@ CLEAR_HOLD_S = 10.0
 # A sample this far (or further) behind the device's newest one, and not a duplicate of something
 # already seen, means the device clock was set back; smaller slips are dropped as out of order.
 CLOCK_JUMP_S = 60.0
+# The sample after a jump candidate must follow it this closely to confirm the jump.
+CLOCK_JUMP_CONFIRM_S = MAX_GAP_S
 # How far back the engine remembers the timestamps it has accepted (to recognise redeliveries).
 SEEN_WINDOW_S = 900.0
 
@@ -210,6 +214,7 @@ class Engine:
         self._seen: dict[UUID, set[float]] = {}  # device -> accepted timestamps (recent)
         self._floor = -math.inf  # samples before this were covered by the start-up replay
         self._live: set[UUID] = set()  # devices whose backlog is over (see mark_live)
+        self._jump_candidate: dict[UUID, float] = {}  # device -> ts of an unconfirmed back-jump
         self.clock_jumps = 0
 
     # -- rules -------------------------------------------------------------------------------
@@ -277,8 +282,15 @@ class Engine:
                 or (ts < self._floor and device not in self._live)
             ):
                 return []  # a duplicate, a backlog or a small slip: already counted or too late
+            candidate = self._jump_candidate.get(device)
+            if candidate is None or not 0 < ts - candidate <= CLOCK_JUMP_CONFIRM_S:
+                self._jump_candidate[device] = ts  # wait for the next sample to confirm
+                return []
+            del self._jump_candidate[device]
             self._restart_sequence(device)
             seen = self._seen[device]
+        else:
+            self._jump_candidate.pop(device, None)  # the stream carries on: it was a one-off
         self._newest[device] = ts
         seen.add(ts)
         if len(seen) > 2 * SEEN_WINDOW_S:  # pruned lazily; ~450 entries are live at a 2 s interval

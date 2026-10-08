@@ -493,18 +493,74 @@ async def test_a_message_in_hand_is_finished_before_the_consumer_stops(
 async def test_a_long_rule_is_rebuilt_after_a_restart_in_the_middle_of_its_count(
     seeded: asyncpg.Pool, fake_redis: Redis
 ) -> None:
-    """A 30 minute rule, breached for 40 minutes, restarted at minute 40: the replay must reach
-    back over the rule's whole duration, or the count restarts too late and never completes. (The
-    alarm may open later than it would have without the restart, never not at all.)"""
-    await seeded.execute("UPDATE alarm_rules SET duration_s = 1800 WHERE id = $1", RULE.id)
-    start = time.time() - 2400
-    await insert_series(seeded, start, [85.0] * 1200)
+    """A 10 minute rule (the longest the database allows), breached for 15 minutes, restarted at
+    minute 15: the replay must reach back over the rule's whole duration, or the count restarts
+    too late and never completes. (The alarm may open later than it would have without the
+    restart, never not at all.)"""
+    await seeded.execute("UPDATE alarm_rules SET duration_s = 600 WHERE id = $1", RULE.id)
+    start = time.time() - 900
+    await insert_series(seeded, start, [85.0] * 450)
 
     await (await new_service(seeded, fake_redis)).startup()
 
     (alarm,) = await alarms(seeded)
     assert alarm["state"] == "active"
-    assert start + 1800 <= alarm["opened_at"].timestamp() <= time.time()
+    assert start + 600 <= alarm["opened_at"].timestamp() <= time.time()
+
+
+async def test_a_rule_longer_than_the_api_allows_is_refused_by_the_database(
+    seeded: asyncpg.Pool,
+) -> None:
+    with pytest.raises(asyncpg.CheckViolationError):
+        await seeded.execute("UPDATE alarm_rules SET duration_s = 100000 WHERE id = $1", RULE.id)
+
+
+async def test_a_standby_that_becomes_active_later_rebuilds_the_engine_first(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    """A second replica starts, waits as a standby, and gets its first message hours later. The
+    other replica opened an alarm meanwhile: the standby must know, or it never closes it."""
+    standby = await new_service(seeded, fake_redis)
+    await standby.startup()
+    assert standby.engine.open_count() == 0
+    start = time.time() - 200
+    await insert_series(seeded, start, [85.0] * 100)  # the active replica's work, now in the data
+    primary = await new_service(seeded, fake_redis)
+    await primary.startup()
+    assert (await alarms(seeded))[0]["state"] == "active"
+
+    standby._last_handled -= 3600  # an hour without a message
+    now = time.time()
+    msg = telemetry(now, 70.0)  # recovered: below the clear threshold
+    await standby.handle(msg)  # type: ignore[arg-type]
+    assert msg.acked
+    assert standby.engine.phase_of(RULE.id) is not None
+    assert standby.engine.open_count() == 1  # it knows the alarm that is open in the database
+
+
+async def test_after_a_failed_write_the_engine_is_rebuilt_from_the_database(
+    seeded: asyncpg.Pool, fake_redis: Redis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = await new_service(seeded, fake_redis)
+    await svc.startup()
+    now = time.time()
+    calls = {"n": 0}
+    real = svc.apply
+
+    async def fail_once(t: Any, **kw: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncpg.ForeignKeyViolationError("rule is gone")
+        await real(t, **kw)
+
+    monkeypatch.setattr(svc, "apply", fail_once)
+    for i in range(40):  # long enough to open the alarm: that write fails
+        await svc.handle(telemetry(now + i * STEP, 85.0))  # type: ignore[arg-type]
+        if svc._dirty:
+            break
+    assert svc._dirty  # the engine said "opened", the database did not take it
+    await svc.handle(telemetry(now + 100, 85.0))  # type: ignore[arg-type]
+    assert not svc._dirty
 
 
 async def test_an_alarm_keeps_the_thresholds_it_opened_with(
@@ -537,5 +593,6 @@ async def test_a_device_clock_set_back_does_not_blind_the_live_alarm(
         assert msg.acked
     (alarm,) = await alarms(seeded)
     assert alarm["state"] == "active"
-    assert alarm["opened_at"].timestamp() == pytest.approx(behind + 30, abs=0.01)
+    # the first reading after the jump is only a candidate; the second confirms it
+    assert alarm["opened_at"].timestamp() == pytest.approx(behind + STEP + 30, abs=0.01)
     assert svc.engine.clock_jumps == 1

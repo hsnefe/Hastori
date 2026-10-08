@@ -50,6 +50,10 @@ PREFETCH = 200
 LIVE_WITHIN_S = 60.0  # a reading this close to the wall clock is live, not queued
 RELOAD_INTERVAL_S = 60.0
 LISTEN_CHECK_S = 5.0
+# A second replica waits as a standby (single active consumer) and may become active hours after
+# it started. If nothing was processed for this long, the engine may be missing everything the
+# other replica did: rebuild it from the database before the first message.
+STANDBY_RESYNC_AFTER_S = 120.0
 BACKOFF_MAX_S = 30.0
 DB_COMMAND_TIMEOUT_S = 30.0
 REDIS_TIMEOUT_S = 2.0
@@ -97,6 +101,8 @@ class AlarmService:
         self.tasks: list[asyncio.Task[Any]] = []
         self._conn: AbstractRobustConnection | None = None
         self._channel: Any = None
+        self._last_handled = time.monotonic()
+        self._dirty = False  # the engine moved ahead of the database: rebuild it
 
     # -- database ---------------------------------------------------------------------------
     async def _retry(self, op: Callable[[], Awaitable[T]]) -> T:
@@ -263,6 +269,14 @@ class AlarmService:
         self.engine.history_floor(since)
         log.info("replayed", extra={"samples": len(samples), "lookback_s": lookback})
 
+    async def resync(self) -> None:
+        """Rebuild the engine from the database (rules, open alarms, a replay of recent samples)."""
+        async with self.lock:
+            self.engine = Engine()
+            await self.startup()
+            self._dirty = False
+        log.info("engine rebuilt from the database")
+
     async def reload(self) -> None:
         """Pick up changed rules and devices (a notification, or the periodic safety net)."""
         async with self.lock:
@@ -337,6 +351,14 @@ class AlarmService:
             await self._settle(message.reject(requeue=False))
             return
         sample = Sample(event.device_id, event.ts, event.metrics)
+        try:
+            if self._dirty or time.monotonic() - self._last_handled > STANDBY_RESYNC_AFTER_S:
+                await self.resync()
+        except Stopping:
+            return
+        except PERMANENT_DB_ERRORS as exc:
+            self._dirty = False
+            log.error("rebuilding the engine failed for good", extra={"error": str(exc)})
         if abs(time.time() - event.ts) <= LIVE_WITHIN_S:
             self.engine.mark_live(event.device_id)
         try:
@@ -351,6 +373,10 @@ class AlarmService:
         except Stopping:
             return  # un-acked: redelivered after the restart, and the replay rebuilds the state
         except PERMANENT_DB_ERRORS as exc:
+            # The engine already moved on, the database did not take the transition: rebuild the
+            # engine from the database before the next message, or an alarm would be "open" in
+            # memory only and never announced.
+            self._dirty = True
             metrics.REJECTED.labels(reason="db_rejected").inc()
             log.error(
                 "message dropped by database",
@@ -358,6 +384,10 @@ class AlarmService:
             )
             await self._settle(message.reject(requeue=False))
             return
+        except Exception:
+            self._dirty = True  # same: the redelivery must meet an engine that matches the data
+            raise
+        self._last_handled = time.monotonic()
         metrics.MESSAGES.inc()
         metrics.EVAL_LAG.observe(max(0.0, time.time() - event.ts))
         await self._settle(message.ack())
