@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
+import { LiveProvider, useLive } from "@/lib/live";
 import { ROLES } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import type { Site } from "@/lib/types";
@@ -46,10 +47,10 @@ export function SiteShell({ siteId, children }: { siteId: string; children: Reac
     );
   }
   return (
-    <>
+    <LiveProvider siteId={siteId}>
       <Header site={site} />
       <main className="page">{children}</main>
-    </>
+    </LiveProvider>
   );
 }
 
@@ -95,6 +96,7 @@ function Header({ site }: { site: Site }) {
           })}
         </nav>
         <div className="topbar-end">
+          <ConnectionBadge />
           <span className="user" title={me.email}>
             {ROLES[me.role]}
           </span>
@@ -105,5 +107,29 @@ function Header({ site }: { site: Site }) {
         </div>
       </div>
     </header>
+  );
+}
+
+const STATE_TEXT = {
+  open: "Canlı",
+  connecting: "Bağlanıyor…",
+  backoff: "Yeniden bağlanıyor…",
+  closed: "Bağlantı yok",
+} as const;
+
+export function ConnectionBadge() {
+  const { state } = useLive();
+  // The first connect takes a moment; do not flash a warning for it.
+  const [grace, setGrace] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setGrace(false), 2500);
+    return () => clearTimeout(t);
+  }, []);
+  const kind = state === "open" ? "ok" : state === "connecting" && grace ? "idle" : "warn";
+  return (
+    <span className={`badge badge-${kind}`} role="status" aria-live="polite">
+      <span className="dot" aria-hidden="true" />
+      {STATE_TEXT[state]}
+    </span>
   );
 }

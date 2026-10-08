@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 
+import { Dashboard } from "@/components/Dashboard";
+
 export const metadata: Metadata = { title: "Panel" };
 
-// The dashboard itself comes with the live-data package.
-export default function Page() {
-  return <p className="muted">Panel yakında.</p>;
+export default async function Page({ params }: { params: Promise<{ siteId: string }> }) {
+  const { siteId } = await params;
+  return <Dashboard key={siteId} siteId={siteId} />;
 }
