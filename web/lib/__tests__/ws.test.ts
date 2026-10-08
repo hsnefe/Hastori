@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LiveMessage } from "../types";
-import { backoffDelay, LiveConnection, SILENCE_MS, type ConnectionState, type SocketLike } from "../ws";
+import { backoffDelay, CONNECT_MS, LiveConnection, SILENCE_MS, type ConnectionState, type SocketLike } from "../ws";
 
 class FakeSocket implements SocketLike {
   onopen: (() => void) | null = null;
@@ -140,7 +140,64 @@ describe("LiveConnection", () => {
     sockets[0]!.drop(4403);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(sockets.length).toBe(1);
-    expect(states.at(-1)).toBe("closed");
+    expect(states.at(-1)).toBe("refused");
+  });
+
+  it("does not come back when the server refuses the page's origin (1008), and says so", async () => {
+    const { live, sockets, states } = setup();
+    live.start();
+    await flush();
+    sockets[0]!.drop(1008);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(sockets.length).toBe(1);
+    expect(states.at(-1)).toBe("refused");
+  });
+
+  it("gives up on a socket that never finishes connecting", async () => {
+    const { live, sockets, states } = setup();
+    live.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(CONNECT_MS - 1);
+    expect(sockets[0]!.closed).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets[0]!.closed).toBe(4000);
+    expect(states.at(-1)).toBe("backoff");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sockets.length).toBe(2); // and tries again
+  });
+
+  it("does not time out a socket that did open", async () => {
+    const { live, sockets } = setup();
+    live.start();
+    await flush();
+    sockets[0]!.open();
+    sockets[0]!.say({ type: "hello", sites: [], ts: 1 });
+    await vi.advanceTimersByTimeAsync(CONNECT_MS + 1000);
+    expect(sockets[0]!.closed).toBeNull();
+  });
+
+  it("nudge() reconnects at once instead of waiting out a back-off", async () => {
+    const { live, sockets } = setup();
+    live.start();
+    await flush();
+    sockets[0]!.drop(1006);
+    await vi.advanceTimersByTimeAsync(10); // in the 1 s back-off
+    expect(sockets.length).toBe(1);
+    live.nudge();
+    await flush();
+    expect(sockets.length).toBe(2);
+  });
+
+  it("nudge() does nothing on a connection that is fine or stopped", async () => {
+    const { live, sockets } = setup();
+    live.nudge(); // not started
+    live.start();
+    await flush();
+    sockets[0]!.open();
+    sockets[0]!.say({ type: "hello", sites: [], ts: 1 });
+    live.nudge();
+    await flush();
+    expect(sockets.length).toBe(1);
   });
 
   it("retries when the ticket cannot be fetched", async () => {

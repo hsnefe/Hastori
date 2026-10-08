@@ -5,6 +5,8 @@ import { useEffect } from "react";
 
 import { useSession } from "@/lib/session";
 
+import { Unavailable } from "./Unavailable";
+
 /** "/" has nothing of its own: it sends the visitor to their first site, or to sign-in. */
 export function Home() {
   const { status, me } = useSession();
@@ -16,6 +18,7 @@ export function Home() {
     else if (status === "authenticated" && firstSite) router.replace(`/sites/${firstSite}`);
   }, [status, firstSite, router]);
 
+  if (status === "unavailable") return <Unavailable />;
   if (status === "authenticated" && !firstSite) {
     return (
       <main className="centered">

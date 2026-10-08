@@ -7,7 +7,7 @@ import type { Rule } from "@/lib/types";
 import { defaultDevice } from "../Dashboard";
 import { COMPLETE_COVERAGE } from "../EnergyCard";
 import { loginErrorMessage } from "../LoginForm";
-import { ruleBody, ruleError } from "../RulesPage";
+import { RuleChangedError, ruleBody, ruleError } from "../RulesPage";
 
 const device = (id: string, type: string): LiveDevice => ({
   id,
@@ -96,5 +96,11 @@ describe("rule values", () => {
     const { formatRuleValue } = await import("@/lib/format");
     expect(formatRuleValue("reactive_ratio", "reactive_power_kvar", 0.18)).toBe("0,180");
     expect(formatRuleValue("threshold", "temperature_c", 80)).toBe("80,0 °C");
+  });
+});
+
+describe("rule saving", () => {
+  it("tells the editor that somebody else changed the rule meanwhile", () => {
+    expect(ruleError(new RuleChangedError())).toContain("başka biri");
   });
 });

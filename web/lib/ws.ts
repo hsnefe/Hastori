@@ -5,7 +5,9 @@
 
 import type { LiveMessage } from "./types";
 
-export type ConnectionState = "connecting" | "open" | "backoff" | "closed";
+/** `refused`: the server will not take this screen (a site outside the account, a page origin it
+ * does not list); retrying cannot help and the reason is worth showing. */
+export type ConnectionState = "connecting" | "open" | "backoff" | "closed" | "refused";
 
 /** The part of WebSocket this module uses (so tests can play the server). */
 export interface SocketLike {
@@ -26,13 +28,16 @@ export interface LiveOptions {
   random?: () => number;
   /** No message at all (the server sends a heartbeat every 25 s) for this long = a dead link. */
   silenceMs?: number;
+  connectMs?: number;
 }
 
 export const SILENCE_MS = 60_000;
+/** A socket that is still connecting after this long (a black-holed route) is given up on. */
+export const CONNECT_MS = 15_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-// The site is not ours to see: retrying cannot help.
-const CLOSE_FORBIDDEN = 4403;
+// The site is not ours to see (4403) or the page's origin is not allowed (1008): retrying cannot help.
+const NO_RETRY_CODES = new Set([4403, 1008]);
 
 /** 1 s, 2 s, 4 s ... up to 30 s, each scaled by 50-100 %: a restarted server is not hit by every
  * screen at the same instant. */
@@ -47,6 +52,7 @@ export class LiveConnection {
   private generation = 0; // a socket or ticket request from before stop()/reconnect is ignored
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
 
   constructor(private readonly options: LiveOptions) {}
@@ -73,7 +79,17 @@ export class LiveConnection {
   private clearTimers(): void {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
-    this.retryTimer = this.silenceTimer = null;
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.retryTimer = this.silenceTimer = this.connectTimer = null;
+  }
+
+  /** The network is back or the tab became visible: do not sit out the rest of a back-off. */
+  nudge(): void {
+    if (this.stopped || !this.retryTimer) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.attempt = 0;
+    void this.connect();
   }
 
   private async connect(): Promise<void> {
@@ -89,8 +105,17 @@ export class LiveConnection {
     if (generation !== this.generation) return;
     const socket = this.options.makeSocket(ticket);
     this.socket = socket;
+    this.connectTimer = setTimeout(() => {
+      if (generation !== this.generation) return;
+      this.socket = null;
+      socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+      socket.close(4000);
+      this.scheduleRetry();
+    }, this.options.connectMs ?? CONNECT_MS);
     socket.onopen = () => {
       if (generation !== this.generation) return;
+      if (this.connectTimer) clearTimeout(this.connectTimer);
+      this.connectTimer = null;
       socket.send(JSON.stringify({ type: "subscribe", site_id: this.options.siteId }));
       this.armSilence(generation);
     };
@@ -114,9 +139,11 @@ export class LiveConnection {
       if (generation !== this.generation) return;
       this.socket = null;
       if (this.silenceTimer) clearTimeout(this.silenceTimer);
-      if (event.code === CLOSE_FORBIDDEN) {
+      if (this.connectTimer) clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+      if (NO_RETRY_CODES.has(event.code)) {
         this.stopped = true;
-        this.options.onState("closed");
+        this.options.onState("refused");
         return;
       }
       this.scheduleRetry();

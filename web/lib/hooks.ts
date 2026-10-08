@@ -25,7 +25,7 @@ export function useNow(ms: number): number {
 export function useDevices(siteId: string) {
   return useQuery({
     queryKey: ["devices", siteId],
-    queryFn: () => api.get<LiveDevice[]>(`/sites/${siteId}/devices`),
+    queryFn: () => api.get<LiveDevice[]>(`/sites/${encodeURIComponent(siteId)}/devices`),
     refetchInterval: SAFETY_REFRESH_MS,
   });
 }
@@ -38,7 +38,7 @@ export function isOnline(device: LiveDevice, now: number): boolean {
 export function useConsumption(siteId: string) {
   return useQuery({
     queryKey: ["consumption", siteId],
-    queryFn: () => api.get<Consumption>(`/sites/${siteId}/consumption/daily?days=7`),
+    queryFn: () => api.get<Consumption>(`/sites/${encodeURIComponent(siteId)}/consumption/daily?days=7`),
     refetchInterval: SAFETY_REFRESH_MS,
   });
 }
@@ -49,17 +49,23 @@ const REDRAW_MS = 1000;
  * The last 15 minutes of one metric of one device: one REST read, then the socket appends.
  * Redraws are limited to once a second whatever the arrival rate, so the chart stays cheap.
  */
-export function useLiveSeries(deviceId: string | undefined, metric: Metric): { points: Point[]; loading: boolean } {
+export function useLiveSeries(
+  deviceId: string | undefined,
+  metric: Metric,
+): { points: Point[]; loading: boolean; error: boolean; retry: () => void } {
   const { subscribe } = useLive();
   const base = useQuery({
     queryKey: ["series", deviceId, metric],
     enabled: deviceId !== undefined,
-    staleTime: Infinity, // only a resync (invalidation) reads it again
+    staleTime: Infinity, // while it is on screen only a resync (invalidation) reads it again
+    // Not kept once the chart leaves the screen: coming back to a device or metric must read the
+    // last 15 minutes again, or the old snapshot and the new live points leave a hole.
+    gcTime: 0,
     queryFn: () => {
       const to = new Date();
       const from = new Date(to.getTime() - WINDOW_MS);
       return api.get<Series>(
-        `/devices/${deviceId}/measurements?metric=${metric}&interval=raw&from=${from.toISOString()}&to=${to.toISOString()}`,
+        `/devices/${encodeURIComponent(deviceId ?? "")}/measurements?metric=${metric}&interval=raw&from=${from.toISOString()}&to=${to.toISOString()}`,
       );
     },
   });
@@ -101,5 +107,10 @@ export function useLiveSeries(deviceId: string | undefined, metric: Metric): { p
     return () => clearInterval(id);
   }, [snapshot]);
 
-  return { points, loading: base.isPending && deviceId !== undefined };
+  return {
+    points,
+    loading: base.isPending && deviceId !== undefined,
+    error: base.isError,
+    retry: () => void base.refetch(),
+  };
 }

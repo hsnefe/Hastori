@@ -20,6 +20,10 @@ export class ApiError extends Error {
   }
 }
 
+/** What a refresh came to. Only `rejected` means the session is over: a down server, a proxy
+ * error or a lost connection says nothing about whether the cookie is still good. */
+export type RefreshResult = { kind: "ok"; token: string } | { kind: "rejected" } | { kind: "unavailable" };
+
 export interface ApiDeps {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
@@ -30,7 +34,7 @@ const MAX_RETRY_AFTER_S = 10;
 
 export function createApi(deps: ApiDeps) {
   let accessToken: string | null = null;
-  let refreshing: Promise<string | null> | null = null;
+  let refreshing: Promise<RefreshResult> | null = null;
   const expiredListeners = new Set<() => void>();
 
   async function errorFrom(res: Response): Promise<ApiError> {
@@ -50,18 +54,31 @@ export function createApi(deps: ApiDeps) {
   }
 
   /** One refresh at a time: parallel 401s (and parallel tabs' worth of effects) share it. */
-  function refresh(): Promise<string | null> {
-    refreshing ??= (async () => {
+  function refresh(): Promise<RefreshResult> {
+    refreshing ??= (async (): Promise<RefreshResult> => {
       try {
-        const res = await deps.fetch(`${deps.base}/api/v1/auth/refresh`, { method: "POST" });
-        if (!res.ok) {
-          accessToken = null;
-          return null;
+        for (let attempt = 0; ; attempt++) {
+          const res = await deps.fetch(`${deps.base}/api/v1/auth/refresh`, { method: "POST" });
+          if (res.ok) {
+            const token = ((await res.json()) as TokenOut).access_token;
+            accessToken = token;
+            return { kind: "ok", token };
+          }
+          if (res.status === 401 || res.status === 403) {
+            accessToken = null;
+            return { kind: "rejected" };
+          }
+          // A backing service is down (503 + Retry-After): the server already rotated the
+          // cookie and sent the new one with the error, so asking again once is safe.
+          const wait = Number(res.headers.get("Retry-After"));
+          if (res.status === 503 && attempt === 0 && Number.isFinite(wait) && wait > 0) {
+            await deps.sleep(Math.min(wait, MAX_RETRY_AFTER_S) * 1000);
+            continue;
+          }
+          return { kind: "unavailable" };
         }
-        accessToken = ((await res.json()) as TokenOut).access_token;
-        return accessToken;
       } catch {
-        return null; // the network, not the session: keep the token we have
+        return { kind: "unavailable" }; // the network, not the session: keep the token we have
       } finally {
         refreshing = null;
       }
@@ -90,8 +107,9 @@ export function createApi(deps: ApiDeps) {
       if (res.ok) return (res.status === 204 ? undefined : await res.json()) as T;
       if (res.status === 401 && auth && !refreshed) {
         refreshed = true;
-        if (await refresh()) continue;
-        expiredListeners.forEach((fn) => fn());
+        const result = await refresh();
+        if (result.kind === "ok") continue;
+        if (result.kind === "rejected") expiredListeners.forEach((fn) => fn());
       }
       const error = await errorFrom(res);
       if (res.status === 503 && !waited && error.retryAfterS !== null) {
@@ -114,7 +132,7 @@ export function createApi(deps: ApiDeps) {
       const out = await request<TokenOut>("POST", "/auth/login", { email, password }, { auth: false });
       accessToken = out.access_token;
     },
-    /** Called once on page load: a token from the refresh cookie, or null when there is no session. */
+    /** Called on page load: a token from the refresh cookie, no session, or "unavailable". */
     restore: refresh,
     async logout(): Promise<void> {
       try {

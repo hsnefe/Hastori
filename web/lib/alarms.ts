@@ -57,7 +57,7 @@ export function useAlarmDetail(alarmId: string | null) {
   return useQuery({
     queryKey: ["alarm", alarmId],
     enabled: alarmId !== null,
-    queryFn: () => api.get<AlarmDetail>(`/alarms/${alarmId}`),
+    queryFn: () => api.get<AlarmDetail>(`/alarms/${encodeURIComponent(alarmId ?? "")}`),
   });
 }
 
@@ -65,7 +65,7 @@ export function useAcknowledge() {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
-    mutationFn: (alarmId: string) => api.post<Alarm>(`/alarms/${alarmId}/ack`),
+    mutationFn: (alarmId: string) => api.post<Alarm>(`/alarms/${encodeURIComponent(alarmId)}/ack`),
     onSuccess: (_alarm, alarmId) => {
       toast("success", "Alarm onaylandı.");
       void queryClient.invalidateQueries({ queryKey: ["alarms"] });

@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { formatNumber, METRICS, SEVERITIES } from "@/lib/format";
+import { parseDecimal, parseInteger } from "@/lib/numbers";
 import { canWrite, useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import type { Page, Rule, RuleBody } from "@/lib/types";
@@ -25,8 +26,17 @@ export function ruleBody(rule: Rule, over: Partial<RuleBody>): RuleBody {
   };
 }
 
+/** The rule was changed by someone else between opening the form and saving it. */
+export class RuleChangedError extends Error {
+  constructor() {
+    super("rule changed");
+    this.name = "RuleChangedError";
+  }
+}
+
 /** What the API said was wrong with a rule, in one sentence. */
 export function ruleError(error: unknown): string {
+  if (error instanceof RuleChangedError) return "Kural bu arada başka biri tarafından değiştirildi; liste yenilendi, tekrar deneyin.";
   if (error instanceof ApiError) {
     if (error.status === 422) return `Değerler geçersiz: ${error.message}`;
     if (error.status === 409) return "Bu cihaz ve ölçüm için etkin başka bir kural var.";
@@ -123,13 +133,24 @@ function useSaveRule(siteId: string, onSaved?: () => void) {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
-    mutationFn: ({ rule, body }: { rule: Rule; body: RuleBody }) => api.put<Rule>(`/alarm-rules/${rule.id}`, body),
+    mutationFn: async ({ rule, body }: { rule: Rule; body: RuleBody }) => {
+      // The whole rule is sent, so a stale form would silently undo someone else's change (or
+      // switch a rule back on). Compare with what is stored now before overwriting it.
+      const current = await api.get<Rule>(`/alarm-rules/${encodeURIComponent(rule.id)}`);
+      if (JSON.stringify(ruleBody(current, {})) !== JSON.stringify(ruleBody(rule, {}))) {
+        throw new RuleChangedError();
+      }
+      return api.put<Rule>(`/alarm-rules/${encodeURIComponent(rule.id)}`, body);
+    },
     onSuccess: () => {
       toast("success", "Kural kaydedildi.");
       void queryClient.invalidateQueries({ queryKey: ["rules", siteId] });
       onSaved?.();
     },
-    onError: (error) => toast("warning", ruleError(error)),
+    onError: (error) => {
+      toast("warning", ruleError(error));
+      if (error instanceof RuleChangedError) void queryClient.invalidateQueries({ queryKey: ["rules", siteId] });
+    },
   });
 }
 
@@ -142,11 +163,11 @@ function RuleEditor({ rule, siteId, onDone }: { rule: Rule; siteId: string; onDo
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    const t = Number(threshold.replace(",", "."));
-    const c = Number(clear.replace(",", "."));
-    const d = Number(duration);
-    if (![t, c, d].every(Number.isFinite)) return setError("Sayı girin.");
-    if (!Number.isInteger(d) || d < 0 || d > 600) return setError("Süre 0 ile 600 sn arasında tam sayı olmalı.");
+    const t = parseDecimal(threshold);
+    const c = parseDecimal(clear);
+    const d = parseInteger(duration);
+    if (t === null || c === null) return setError("Eşikler sayı olmalı (örnek: 80 ya da 0,18; binlik ayracı yok).");
+    if (d === null || d > 600) return setError("Süre 0 ile 600 sn arasında tam sayı olmalı.");
     if (rule.operator === ">" && c > t) return setError("Kapanma eşiği eşikten büyük olamaz.");
     if (rule.operator === "<" && c < t) return setError("Kapanma eşiği eşikten küçük olamaz.");
     setError(null);
@@ -159,7 +180,7 @@ function RuleEditor({ rule, siteId, onDone }: { rule: Rule; siteId: string; onDo
       <td>{rule.name}</td>
       <td>{rule.device_name}</td>
       <td>
-        {METRICS[rule.metric].label} {rule.operator}{" "}
+        {rule.kind === "reactive_ratio" ? "Reaktif oran" : METRICS[rule.metric].label} {rule.operator}{" "}
         <input form={form} aria-label="Eşik" inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} size={7} />
       </td>
       <td>

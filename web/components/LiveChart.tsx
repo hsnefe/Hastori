@@ -13,10 +13,21 @@ const PowerChart = dynamic(() => import("./PowerChart"), {
 });
 
 export function LiveChart({ deviceId, metric, timeZone }: { deviceId: string | undefined; metric: Metric; timeZone: string }) {
-  const { points, loading } = useLiveSeries(deviceId, metric);
+  const { points, loading, error, retry } = useLiveSeries(deviceId, metric);
   const now = useNow(1000);
   if (!deviceId) return <div className="chart-box muted">Bu tesiste cihaz yok.</div>;
   if (loading) return <div className="chart-box muted">Ölçümler yükleniyor…</div>;
+  if (error && points.length === 0) {
+    // An error is not "no data": say it, and offer another try.
+    return (
+      <div className="chart-box" role="alert">
+        <p className="form-error">Ölçümler alınamadı.</p>
+        <button type="button" onClick={retry}>
+          Tekrar dene
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="chart-box" role="img" aria-label={`${METRICS[metric].label}, son 15 dakika`}>
       <PowerChart points={points} now={now} unit={METRICS[metric].unit} label={METRICS[metric].label} timeZone={timeZone} />

@@ -10,6 +10,7 @@ import { useSession } from "@/lib/session";
 import type { Site } from "@/lib/types";
 
 import { ThemeToggle } from "./ThemeToggle";
+import { Unavailable } from "./Unavailable";
 
 const NAV = [
   { href: "", label: "Panel" },
@@ -26,6 +27,7 @@ export function SiteShell({ siteId, children }: { siteId: string; children: Reac
     if (status === "anonymous") router.replace("/login");
   }, [status, router]);
 
+  if (status === "unavailable") return <Unavailable />;
   if (status !== "authenticated" || !me) {
     return (
       <main className="centered">
@@ -119,6 +121,7 @@ const STATE_TEXT = {
   connecting: "Bağlanıyor…",
   backoff: "Yeniden bağlanıyor…",
   closed: "Bağlantı yok",
+  refused: "Bağlantı reddedildi",
 } as const;
 
 export function ConnectionBadge() {

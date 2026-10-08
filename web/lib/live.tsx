@@ -74,6 +74,7 @@ export function LiveProvider({ siteId, children }: { siteId: string; children: R
           }
           break;
         case "resync":
+          // Everything is stale; an open series snapshot included (its live tail restarts too).
           void queryClient.invalidateQueries();
           break;
         default:
@@ -93,7 +94,17 @@ export function LiveProvider({ siteId, children }: { siteId: string; children: R
       onState: setState,
     });
     connection.start();
-    return () => connection.stop();
+    // Back from sleep or from a network break: reconnect now, not after the rest of a back-off.
+    const nudge = () => {
+      if (document.visibilityState === "visible") connection.nudge();
+    };
+    window.addEventListener("online", nudge);
+    document.addEventListener("visibilitychange", nudge);
+    return () => {
+      window.removeEventListener("online", nudge);
+      document.removeEventListener("visibilitychange", nudge);
+      connection.stop();
+    };
   }, [siteId, handle]);
 
   const subscribe = useCallback((listener: Listener) => {

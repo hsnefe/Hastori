@@ -5,7 +5,7 @@ import { useState } from "react";
 import { ApiError } from "@/lib/api";
 import { DEVICE_TYPES, formatMetric, METRIC_ORDER, METRICS, formatTime } from "@/lib/format";
 import { isOnline, useDevices, useNow } from "@/lib/hooks";
-import type { LiveDevice } from "@/lib/live";
+import { useLive, type LiveDevice } from "@/lib/live";
 import { useSession } from "@/lib/session";
 import type { Metric } from "@/lib/types";
 
@@ -22,6 +22,7 @@ export function Dashboard({ siteId }: { siteId: string }) {
   const { me } = useSession();
   const devices = useDevices(siteId);
   const now = useNow(1000);
+  const { state: connection } = useLive();
   const [picked, setPicked] = useState<string | null>(null);
   const [metric, setMetric] = useState<Metric>("active_power_kw");
   const site = me?.sites.find((s) => s.id === siteId);
@@ -52,6 +53,8 @@ export function Dashboard({ siteId }: { siteId: string }) {
               key={device.id}
               device={device}
               online={isOnline(device, now)}
+              // Our own link is down: the device may be fine, the screen just hears nothing.
+              delayed={connection !== "open"}
               selected={device.id === selected?.id}
               onSelect={() => setPicked(device.id)}
               timeZone={site?.timezone ?? "Europe/Istanbul"}
@@ -100,12 +103,14 @@ export function Dashboard({ siteId }: { siteId: string }) {
 function DeviceCard({
   device,
   online,
+  delayed,
   selected,
   onSelect,
   timeZone,
 }: {
   device: LiveDevice;
   online: boolean;
+  delayed: boolean;
   selected: boolean;
   onSelect: () => void;
   timeZone: string;
@@ -124,7 +129,7 @@ function DeviceCard({
         </span>
         <span className={`badge badge-${online ? "ok" : "off"}`}>
           <span className="dot" aria-hidden="true" />
-          {online ? "Çevrimiçi" : "Çevrimdışı"}
+          {online ? "Çevrimiçi" : delayed ? "Veri gecikmeli" : "Çevrimdışı"}
         </span>
       </span>
       <span className="metric-list">

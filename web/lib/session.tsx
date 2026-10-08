@@ -7,15 +7,18 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { api } from "./api";
+import { useToast } from "./toast";
 import type { Me } from "./types";
 
-type Status = "loading" | "anonymous" | "authenticated";
+type Status = "loading" | "anonymous" | "authenticated" | "unavailable";
 
 interface SessionValue {
   status: Status;
   me: Me | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** After "unavailable": try to restore the session again. */
+  retry: () => void;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -25,22 +28,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>("loading");
   const [me, setMe] = useState<Me | null>(null);
 
+  const [attempt, setAttempt] = useState(0);
+  const toast = useToast();
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const token = await api.restore();
-        const user = token ? await api.get<Me>("/auth/me") : null;
+        const result = await api.restore();
+        if (cancelled) return;
+        if (result.kind === "unavailable") return setStatus("unavailable"); // not "signed out"
+        const user = result.kind === "ok" ? await api.get<Me>("/auth/me") : null;
         if (cancelled) return;
         setMe(user);
         setStatus(user ? "authenticated" : "anonymous");
       } catch {
-        if (!cancelled) setStatus("anonymous");
+        if (!cancelled) setStatus("unavailable");
       }
     })();
     return () => {
       cancelled = true;
     };
+  }, [attempt]);
+
+  const retry = useCallback(() => {
+    setStatus("loading");
+    setAttempt((n) => n + 1);
   }, []);
 
   useEffect(
@@ -64,14 +77,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       await api.logout();
     } catch {
-      // the cookie may already be gone; the screen signs out either way
+      // The screen signs out either way, but the server did not hear it: the httpOnly cookie
+      // stays valid until it expires. Say so, on a shared computer that matters.
+      toast("warning", "Çıkış sunucuya iletilemedi; bu tarayıcıda oturum bir süre açık kalabilir.");
     }
     queryClient.clear();
     setMe(null);
     setStatus("anonymous");
-  }, [queryClient]);
+  }, [queryClient, toast]);
 
-  const value = useMemo(() => ({ status, me, login, logout }), [status, me, login, logout]);
+  const value = useMemo(() => ({ status, me, login, logout, retry }), [status, me, login, logout, retry]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { HISTORY_PAGE_SIZE, useAcknowledge, useAlarmDetail, useAlarmHistory, type HistoryFilter } from "@/lib/alarms";
 import {
@@ -15,6 +15,7 @@ import {
   zoneLabel,
 } from "@/lib/format";
 import { canWrite, useSession } from "@/lib/session";
+import { isUuid } from "@/lib/uuid";
 import type { AlarmState } from "@/lib/types";
 import { startOfDay, startOfNextDay } from "@/lib/zone";
 
@@ -26,7 +27,9 @@ export function AlarmsPage({ siteId }: { siteId: string }) {
   const router = useRouter();
   const site = me?.sites.find((s) => s.id === siteId);
   const timeZone = site?.timezone ?? "Europe/Istanbul";
-  const detailId = params.get("alarm");
+  const rawAlarm = params.get("alarm");
+  // The address bar is editable: only a real id may become part of an API path.
+  const detailId = isUuid(rawAlarm) ? rawAlarm : null;
   const [filter, setFilter] = useState<HistoryFilter>({ state: "", from: "", to: "", page: 1 });
 
   const bounds = {
@@ -138,8 +141,14 @@ function AlarmDetailPanel({ alarmId, timeZone, onClose }: { alarmId: string; tim
   const detail = useAlarmDetail(alarmId);
   const ack = useAcknowledge();
   const a = detail.data;
+  const panel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    // The panel opens below the table, often off screen: bring it into view and to the reader.
+    panel.current?.scrollIntoView?.({ block: "start" });
+    panel.current?.focus({ preventScroll: true });
+  }, [alarmId]);
   return (
-    <section className="card detail" aria-labelledby="detail-title">
+    <section ref={panel} tabIndex={-1} className="card detail" aria-labelledby="detail-title">
       <div className="card-head">
         <h2 id="detail-title">Alarm ayrıntısı</h2>
         <button type="button" onClick={onClose}>

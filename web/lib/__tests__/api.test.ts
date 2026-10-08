@@ -102,9 +102,64 @@ describe("api", () => {
     await expect(api.get("/sites")).rejects.toMatchObject({ status: 502, code: "error" });
   });
 
-  it("restore() resolves to null when there is no session", async () => {
+  it("restore() says rejected when there is no session", async () => {
     const { api } = harness(() => json({ error: { code: "unauthorized", message: "No refresh token" } }, 401));
-    expect(await api.restore()).toBeNull();
+    expect(await api.restore()).toEqual({ kind: "rejected" });
     expect(api.token()).toBeNull();
+  });
+
+  describe("a refresh that fails for another reason than the session", () => {
+    function signedIn(refresh: Handler) {
+      const h = harness((url, init) => {
+        if (url.endsWith("/auth/login")) return json({ access_token: "tok-1", expires_in: 900 });
+        if (url.endsWith("/auth/refresh")) return refresh(url, init);
+        return json({ error: { code: "unauthorized", message: "expired" } }, 401);
+      });
+      return h;
+    }
+
+    it("is not a sign-out when the server is down (5xx)", async () => {
+      const { api } = signedIn(() => new Response("<html>bad gateway</html>", { status: 502 }));
+      await api.login("a@b.c", "pw");
+      const expired = vi.fn();
+      api.onSessionExpired(expired);
+      await expect(api.get("/sites")).rejects.toMatchObject({ status: 401 });
+      expect(expired).not.toHaveBeenCalled();
+      expect(api.token()).toBe("tok-1"); // the token is kept for the next try
+    });
+
+    it("is not a sign-out when the network is gone", async () => {
+      const { api } = signedIn(() => {
+        throw new TypeError("Failed to fetch");
+      });
+      await api.login("a@b.c", "pw");
+      const expired = vi.fn();
+      api.onSessionExpired(expired);
+      await expect(api.get("/sites")).rejects.toMatchObject({ status: 401 });
+      expect(expired).not.toHaveBeenCalled();
+      expect(await api.restore()).toEqual({ kind: "unavailable" });
+    });
+
+    it("asks once more after a 503 with Retry-After (the server sent the new cookie with it)", async () => {
+      let calls = 0;
+      const { api, sleeps } = signedIn(() => {
+        calls++;
+        return calls === 1
+          ? json({ error: { code: "unavailable", message: "busy" } }, 503, { "Retry-After": "2" })
+          : json({ access_token: "fresh", expires_in: 900 });
+      });
+      expect(await api.restore()).toEqual({ kind: "ok", token: "fresh" });
+      expect(calls).toBe(2);
+      expect(sleeps).toEqual([2000]);
+    });
+
+    it("is a sign-out only when the server rejects the cookie (401)", async () => {
+      const { api } = signedIn(() => json({ error: { code: "unauthorized", message: "reused" } }, 401));
+      await api.login("a@b.c", "pw");
+      const expired = vi.fn();
+      api.onSessionExpired(expired);
+      await expect(api.get("/sites")).rejects.toMatchObject({ status: 401 });
+      expect(expired).toHaveBeenCalledTimes(1);
+    });
   });
 });
