@@ -4,7 +4,7 @@ Gün 1 (altyapı) ve Gün 2 (alarm servisi, API) için bulunan sorunlar koda dü
 "Design notes"). Bu belge, **henüz yazılmamış** parçalar (gateway, CI,
 yayın) için tasarım aşamasında bilinmesi gereken riskleri ve Gün 2'den **açık kalanları**
 toplar. Her madde bir "yapılacak"tır: ilgili günün başında gözden geçirilmeli, çözülünce buradan
-silinmeli. Gün 2'de kapanan maddeler (alarm süresinin saati, flapping, idempotans, yeniden
+silinmeli. Gün 2'de kapanan maddeler (çevrimdışı cihaz için alarm yok: `no_data` kural türü eklendi, G1; alarm süresinin saati, flapping, idempotans, yeniden
 başlatma, yetki sızıntısı, refresh rotation yarışı, Redis kalıcılığı, denetim kaydı, reaktif
 oranın günlük kümülatif sıçraması) silindi. 2026-10-08'de canlı yığında (`make smoke`, `make e2e`,
 `make resilience`, alarm servisi için elle RabbitMQ/DB/kill denemeleri) doğrulandı; günlük kWh
@@ -21,7 +21,6 @@ değil, denemeyle doğrulanmalı.
 
 | # | Risk | Karar / önlem |
 |---|------|---------------|
-| G1 | **Çevrimdışı cihaz için alarm yok.** Cihaz susarsa açık alarm açık kalır, bekleyen süre boşluk kuralıyla sıfırlanır; ama "cihaz 60 sn'dir veri göndermiyor" diye bir alarm üretilmez (`no_data_s` yazılmadı). Dashboard kartı çevrimdışı rozeti gösterir (son ölçüm 30 sn'den eski; Gün 3'te yapıldı). | Alarm istenirse `kind: no_data` kural türü (yeni migration) ve alarm servisinde cihaz başına son `ts` zamanlayıcısı (~2 sa; MVP bitince bonus). |
 | G2 | **Kuyruk ve DLQ için uyarı yok.** `alarm.telemetry` derinliği ve `alarm.telemetry.dlq` büyümesi yalnızca RabbitMQ yönetim ekranında ve `alarm_rejected_total` sayacında görünür; eskiyen mesaj DLQ'ya gider ama kimseyi uyarmaz. | Gün 4 Prometheus: `alarm.telemetry` derinliği, DLQ derinliği, `alarm_eval_lag_seconds`, `ingest_outbox_depth` için uyarı kuralları (E3 ile birlikte). |
 | G3 | **Parola değişikliği refresh oturumlarını bitirmez.** Erişim belirteci her istekte veritabanından doğrulanır (rol, tesis, kullanıcı varlığı); refresh belirteci yalnızca Redis'e karşı. Parolası değişen kullanıcının (kullanıcıyı pasife alma özelliği yok) açık refresh oturumu 7 güne kadar yenilenebilir. | Kullanıcı başına belirteç sürümü (`users.token_version`, refresh kaydında saklanır) ya da Redis'te `user -> aileler` indeksi; parola değişince ve kullanıcı değişiminde aileleri iptal et. (Bir oturum en geç 30 gün sonra, yenilense de, sona erer.) |
 | G4 | **Giriş sınırı çok adresli saldırganı durdurmaz.** Gerçek istemci adresi artık Caddy'den (`CF-Connecting-IP` / `X-Forwarded-For`, yalnızca `TRUSTED_PROXIES`'ten) alınıyor ve sayaç hem e-posta+adres (5) hem yalnız adres (30) için tutuluyor. Kalan: çok sayıda adresten dağıtık deneme ve kopya Caddy imajında oran sınırı olmaması. | Gün 4: `xcaddy` ile `caddy-ratelimit` içeren özel imaj, login için gateway'de ayrı sıkı limit (E2). Hesap başına ikinci, daha yüksek eşik düşünülebilir (kilitlenme riskiyle). |
@@ -35,6 +34,7 @@ değil, denemeyle doğrulanmalı.
 | G13 | **Yeniden tesliminde alarm olayı tekrar yayınlanmaz.** Süreç commit ile Redis `PUBLISH` arasında ölürse `alarm.opened` canlı ekranlara hiç gitmez; yeniden tesliminde alarm zaten açık olduğu için olay üretilmez (G8'in özel hâli). | Olayları outbox'tan geçir (README'de yazılı); en azından "zaten açık" yolunda olayı yeniden yayınla. |
 | G14 | **Onaylayanın e-postası** alarmı gören her viewer'a döner (`queries/alarms.py`). | Görünen ad ya da rol göster. |
 | G15 | **`clear_threshold` eşiğe eşit olabilir** (sıfır bant); yalnızca 10 sn'lik `CLEAR_HOLD_S` titremeyi sınırlar. | Bandı `>` 0 zorunlu kıl (API ve CHECK) ya da UI'da uyar. |
+| G16 | **`no_data` tüm filo susunca alarm vermez.** Sessizlik yalnızca hattın canlı olduğu görülürse cihaza yazılır (başka bir cihazdan veri geliyorsa); her cihaz birden susarsa (örn. iki tesisin birden elektriği gider) bu, ingestion/broker kesintisinden ayırt edilemez ve alarm açılmaz. Hat 20 sn'den uzun susup geri gelince tüm sessizlik sayaçları baştan başlar: gerçekten ölü bir cihazın alarmı o andan `duration_s` sonra açılır. | Hat sağlığı için ayrı uyarı (G2: kuyruk derinliği, `ingest_*` sayaçları). Tek tesisli kurulumda cihazlardan biri hep canlı olmalıdır; gerekirse `no_data`'yı tesis ana sayacına bağla. |
 
 ## 2. TimescaleDB (Gün 3)
 

@@ -3,7 +3,7 @@
 Industrial telemetry platform. A simulator publishes measurements from 7 devices every 2 seconds
 over MQTT (TLS + per-device ACL) to an ingestion service, which writes them to TimescaleDB and
 publishes them to RabbitMQ. An alarm service evaluates rules on that stream (hysteresis, duration,
-reactive-energy ratio) and a REST API (JWT, three roles, strict per-site isolation) serves
+reactive-energy ratio, silent devices) and a REST API (JWT, three roles, strict per-site isolation) serves
 devices, time series, daily consumption, alarms and rule management. A Next.js dashboard (Turkish
 interface, light and dark) shows the devices, a live chart, the daily energy and the alarms, and
 updates over a WebSocket without a page refresh.
@@ -37,7 +37,7 @@ Windows (`winget install ezwinports.make`); PowerShell equivalents are below.
 ```bash
 git clone <repo-url> hastori && cd hastori
 make up          # .env with random secrets, TLS certs, MQTT users/ACL, then timescaledb + mosquitto + rabbitmq + redis + migrate + ingestion + alarm + api + web + caddy (http://127.0.0.1:8080)
-make seed        # demo org, 2 sites, 7 devices, 5 users, 4 alarm rules (idempotent)
+make seed        # demo org, 2 sites, 7 devices, 5 users, 5 alarm rules (idempotent)
 make simulate    # start the field simulator
 make smoke       # automated day-1 checks
 make web-install && make web-dev   # optional: the dashboard with hot reload on http://127.0.0.1:3000 (needs Node 24)
@@ -286,6 +286,20 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
   Capacitive power does not cancel inductive power; below 2 kWh of active energy in the window
   nothing is evaluated (a quiet night would otherwise swing the ratio). The limits are demo
   assumptions: real ones depend on the distribution company.
+- **No data** (`kind: no_data`): a device that stops reporting a metric for `duration_s` seconds
+  (10 to 600; demo rule: 60 s of `temperature_c` on `izmir-komp-1`) opens a warning, and it closes
+  after the metric has been arriving again for 10 s. It has no thresholds (stored as 0 and `>`,
+  left out of the API body). The other kinds fire on a message; this one fires on the absence of
+  one, so the service also looks at the clock every 5 s (`Engine.tick`) and measures silence in the
+  time a reading *arrived*, not in device time: a device whose clock is an hour off is not silent,
+  and a backlog the broker hands over after an outage is not old. Silence is only the device's
+  fault while the rest of the pipeline works: the alarm opens only if a reading of some device
+  arrived at or after the moment the limit was crossed, and when readings return after 20 s
+  without any, every silence clock starts again. A broker, ingestion or RabbitMQ outage therefore
+  blames nobody (`make resilience` stops ingestion and RabbitMQ for 90 s and expects no alarm). A
+  consequence: if the whole fleet falls silent at once (every site loses power), that cannot be told
+  from a pipeline outage and raises no `no_data` alarm. The alarm's peak value is the length of the
+  silence in seconds.
 - **Delivery**: one active consumer reads `alarm.telemetry` in order and acks a message only
   after the transition it caused is committed. Writes are conditional (`INSERT ... ON CONFLICT`
   on the partial unique index "one open alarm per rule", `UPDATE ... WHERE state <> 'cleared'`),
@@ -363,14 +377,16 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
   alarm service starts, a jump deeper than the start-up replay window (15 minutes) looks like a
   queued backlog until a live reading arrives, and is ignored until then. Smaller slips are still
   dropped as out of order.
-- The dashboard has no user or site management screens, no `no_data` alarm (a silent device shows
-  a "Çevrimdışı" badge) and no per-user language: the interface is Turkish, code and docs English.
+- The dashboard has no user or site management screens and no per-user language: the interface is
+  Turkish, code and docs English. The rules page lists and edits rules but creates none (a new
+  rule, `no_data` included, goes through the API).
 
 - The alarm service evaluates in one process (one active queue consumer): at demo load (about 3.5
   messages per second) that is far from a limit; sharding by device is the way beyond it.
-- There is no "device offline" alarm: a silent device keeps its open alarm and shows
-  `online: false` in the device list and an offline badge on its card. A pending count that would
-  span a silence restarts.
+- A silent device shows `online: false` in the device list and an offline badge on its card; an
+  alarm for it exists only where a `no_data` rule is set (the demo has one, on `izmir-komp-1`).
+  A threshold rule's open alarm stays open while its device is silent, and a pending count that
+  would span a silence restarts.
 - A password change does not end the user's refresh sessions (the access token is checked against
   the database on every request, the refresh token only against Redis). A refresh session ends
   at the latest 30 days after the sign-in (`REFRESH_MAX_LIFE_S`), however often it is renewed.
