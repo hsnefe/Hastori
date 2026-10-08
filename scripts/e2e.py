@@ -133,12 +133,16 @@ def compose(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+# uvicorn closes an idle connection after 5 s; polling every 5 s would reuse one that is just gone.
+LIMITS = httpx.Limits(keepalive_expiry=2)
+
+
 class Stack:
     def __init__(self) -> None:
         self.settings = get_settings()
         user, password = self._rabbit_credentials()
         self.rabbit = httpx.AsyncClient(base_url=RABBIT, auth=(user, password), timeout=15)
-        self.plain = httpx.AsyncClient(base_url=API, timeout=15)
+        self.plain = httpx.AsyncClient(base_url=API, timeout=15, limits=LIMITS)
         self.sim = httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{self.settings.sim_control_port}",
             headers={"Authorization": f"Bearer {self.settings.sim_control_token}"},
@@ -174,7 +178,7 @@ class Stack:
 
     async def sign_in(self, actor: str) -> httpx.AsyncClient:
         email, password = self.credentials(actor)
-        client = httpx.AsyncClient(base_url=API, timeout=15)
+        client = httpx.AsyncClient(base_url=API, timeout=15, limits=LIMITS)
         r = await client.post("/auth/login", json={"email": email, "password": password})
         if r.status_code != 200:
             raise RuntimeError(f"cannot sign in as {actor}: {r.status_code} {r.text[:120]}")
