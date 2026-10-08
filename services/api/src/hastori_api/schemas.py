@@ -168,7 +168,7 @@ class RuleBody(BaseModel):
         description="the alarm closes only past this value (hysteresis); on the right side of "
         "the threshold: at or below it for '>', at or above it for '<'"
     )
-    duration_s: int = Field(ge=0, le=86_400, description="how long the breach must last")
+    duration_s: int = Field(ge=0, le=600, description="how long the breach must last")
     window_s: int | None = Field(
         default=None, description="reactive_ratio only: sliding window, 60 to 3600 seconds"
     )

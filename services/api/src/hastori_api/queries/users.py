@@ -1,16 +1,16 @@
 """User management: system admin only, within their own organisation."""
 
-import asyncio
 import uuid
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hastori_api.audit import audit
 from hastori_api.errors import ApiError, conflict, not_found
 from hastori_api.schemas import UserCreate, UserOut, UserPatch
 from hastori_api.scope import SYSTEM_ADMIN, SiteScope
-from hastori_api.security import hash_password
+from hastori_api.security import hash_password_async
 from hastori_common.models import User, UserSite
 
 
@@ -79,10 +79,14 @@ async def create_user(session: AsyncSession, scope: SiteScope, body: UserCreate)
     taken = await session.scalar(select(User.id).where(func.lower(User.email) == email.lower()))
     if taken is not None:
         raise conflict("A user with this e-mail address already exists")
-    password_hash = await asyncio.to_thread(hash_password, body.password)
+    password_hash = await hash_password_async(body.password)
     user = User(org_id=scope.org_id, email=email, password_hash=password_hash, role=body.role)
     session.add(user)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:  # two requests with the same address at once: the unique index decides
+        await session.rollback()
+        raise conflict("A user with this e-mail address already exists") from None
     site_ids = [] if body.role == "system_admin" else sorted(set(body.site_ids))
     session.add_all(UserSite(user_id=user.id, site_id=s) for s in site_ids)
     audit(
@@ -127,7 +131,7 @@ async def patch_user(
         await session.execute(delete(UserSite).where(UserSite.user_id == user.id))
 
     if body.password is not None:
-        user.password_hash = await asyncio.to_thread(hash_password, body.password)
+        user.password_hash = await hash_password_async(body.password)
         changed["password"] = "changed"  # the fact, never the value
 
     audit(session, scope, "user.update", "user", user.id, changed)

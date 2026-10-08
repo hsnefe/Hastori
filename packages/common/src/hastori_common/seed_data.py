@@ -5,9 +5,10 @@ import hmac
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 DEFAULT_SEED_FILE = Path(__file__).resolve().parents[4] / "seed" / "demo.yaml"
 
@@ -25,6 +26,15 @@ class SiteSeed(BaseModel):
     name: str
     city: str | None = None
     timezone: str = "Europe/Istanbul"
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+            raise ValueError(f"unknown time zone {value!r}") from None
+        return value
 
 
 class DeviceSeed(BaseModel):

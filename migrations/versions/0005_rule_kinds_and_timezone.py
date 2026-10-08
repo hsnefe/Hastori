@@ -86,6 +86,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Without `kind` a ratio rule would be read as a plain threshold on reactive power (> 0.18
+    # kvar), which is always true: an alarm that never closes. Switch them off first; rules are
+    # never deleted (alarms refer to them).
+    op.execute("UPDATE alarm_rules SET enabled = false WHERE kind = 'reactive_ratio'")
     op.execute("ALTER TABLE sites DROP COLUMN IF EXISTS timezone")
     op.execute("DROP TRIGGER IF EXISTS alarm_rules_changed ON alarm_rules")
     op.execute("DROP FUNCTION IF EXISTS notify_alarm_rules_changed()")

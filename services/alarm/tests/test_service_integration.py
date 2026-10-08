@@ -488,3 +488,20 @@ async def test_a_message_in_hand_is_finished_before_the_consumer_stops(
     await asyncio.wait_for(consumer, timeout=2)
     assert msg.acked  # finished and acked, then the consumer left
     assert queue.closed
+
+
+async def test_a_long_rule_is_rebuilt_after_a_restart_in_the_middle_of_its_count(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    """A 30 minute rule, breached for 40 minutes, restarted at minute 40: the replay must reach
+    back over the rule's whole duration, or the count restarts too late and never completes. (The
+    alarm may open later than it would have without the restart, never not at all.)"""
+    await seeded.execute("UPDATE alarm_rules SET duration_s = 1800 WHERE id = $1", RULE.id)
+    start = time.time() - 2400
+    await insert_series(seeded, start, [85.0] * 1200)
+
+    await (await new_service(seeded, fake_redis)).startup()
+
+    (alarm,) = await alarms(seeded)
+    assert alarm["state"] == "active"
+    assert start + 1800 <= alarm["opened_at"].timestamp() <= time.time()

@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from hastori_common.seed_data import derive_device_password, load_seed
 
 
@@ -38,3 +40,13 @@ def test_seed_rules_satisfy_the_database_constraints() -> None:
         assert key not in seen, f"two rules for {key}"
         seen.add(key)
     assert len({r.id for r in seed.alarm_rules}) == len(seed.alarm_rules)
+
+
+def test_an_unknown_time_zone_in_the_seed_is_refused() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from hastori_common.seed_data import SiteSeed
+
+    with pytest.raises(ValidationError):
+        SiteSeed(id=UUID(int=1), key="k", name="n", timezone="Mars/Olympus")

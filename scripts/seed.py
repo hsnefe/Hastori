@@ -1,10 +1,12 @@
 """Idempotent seed: loads seed/demo.yaml into the database.
 
 By default it never overwrites what people changed in the running system: existing users keep
-their password hash and existing alarm rules keep their settings. `--reset` makes the YAML win
-again (demo reset): passwords are re-hashed from the environment, rules are restored and the
-site assignments of the seeded users are reconciled. Users and devices that were removed from the
-YAML are never deleted (history and audit records reference them).
+their e-mail address, role and password hash, existing sites keep name, city and time zone,
+devices keep their name and active flag, and existing alarm rules keep their settings.
+`--reset` makes the YAML win again (demo reset): passwords are re-hashed from the environment,
+rules are restored and the site assignments of the seeded users are reconciled. Users and
+devices that were removed from the YAML are never deleted (history and audit records
+reference them).
 """
 
 import argparse
@@ -105,9 +107,14 @@ async def main(reset: bool) -> None:
             }
             for s in seed.sites
         ]
-        # The time zone can be changed through the API; a plain re-seed must not undo that.
-        await conn.execute(_upsert(Site, sites, keep=set() if reset else {"timezone"}))
-        await conn.execute(_upsert(User, users, keep=set() if reset else {"password_hash"}))
+        # Everything the API can change (site name, city, time zone; user e-mail, role, password;
+        # device name) is kept by a plain re-seed; `--reset` is the way back to the YAML.
+        await conn.execute(
+            _upsert(Site, sites, keep=set() if reset else {"name", "city", "timezone"})
+        )
+        await conn.execute(
+            _upsert(User, users, keep=set() if reset else {"email", "role", "password_hash"})
+        )
         if user_sites:
             await conn.execute(insert(UserSite).values(user_sites).on_conflict_do_nothing())
         if reset:
@@ -117,7 +124,9 @@ async def main(reset: bool) -> None:
             if wanted:
                 stale = and_(stale, tuple_(UserSite.user_id, UserSite.site_id).not_in(wanted))
             await conn.execute(delete(UserSite).where(stale))
-        await conn.execute(_upsert(Device, devices, keep={"is_active"}))
+        await conn.execute(
+            _upsert(Device, devices, keep={"is_active"} if reset else {"is_active", "name"})
+        )
         if reset:
             await conn.execute(_upsert(AlarmRule, rules))
         else:

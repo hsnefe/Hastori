@@ -9,11 +9,12 @@ reported as a total with a hole, never as a complete day.
 
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hastori_api.errors import ApiError
 from hastori_api.queries.sites import get_site
 from hastori_api.schemas import ConsumptionOut, DayConsumption
 from hastori_api.scope import SiteScope
@@ -59,7 +60,14 @@ async def daily(
     now: datetime | None = None,
 ) -> ConsumptionOut:
     site = await get_site(session, scope, site_id)  # 404 outside the scope
-    zone = ZoneInfo(site.timezone)
+    try:
+        zone = ZoneInfo(site.timezone)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # the API validates the value, but the column and the seed file are other ways in
+        raise ApiError(
+            422,
+            f"The site's time zone {site.timezone!r} is not valid: correct it with PATCH /sites",
+        ) from None
     now = now or datetime.now(UTC)
     today = now.astimezone(zone).date()
     first = today - timedelta(days=days - 1)

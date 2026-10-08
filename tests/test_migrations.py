@@ -207,3 +207,38 @@ def test_models_match_the_migrated_database(pg_uri: str, template_db: str) -> No
     """`alembic check` finds no difference between the ORM models and the schema."""
     cfg = alembic_config(with_database(pg_uri, template_db))
     command.check(cfg)
+
+
+def test_downgrading_switches_reactive_ratio_rules_off(pg_uri: str, template_db: str) -> None:
+    """Without `kind` they would read as a threshold on reactive power and alarm forever."""
+    name = f"t_{uuid.uuid4().hex[:12]}"
+
+    async def prepare() -> None:
+        conn = await asyncpg.connect(with_database(pg_uri, "postgres"))
+        await conn.execute(f'CREATE DATABASE "{name}" TEMPLATE "{template_db}"')
+        await conn.close()
+        conn = await asyncpg.connect(with_database(pg_uri, name))
+        await seed_device(conn)
+        await conn.execute("UPDATE devices SET type = 'energy_analyzer' WHERE id = $1", DEVICE)
+        await conn.execute(
+            "INSERT INTO alarm_rules (id, device_id, name, metric, operator, threshold, "
+            "clear_threshold, duration_s, severity, kind, window_s) VALUES "
+            "($1, $2, 'ratio', 'reactive_power_kvar', '>', 0.18, 0.165, 0, 'warning', "
+            "'reactive_ratio', 600)",
+            uuid.uuid4(),
+            DEVICE,
+        )
+        await conn.close()
+
+    asyncio.run(prepare())
+    dsn = with_database(pg_uri, name)
+    command.downgrade(alembic_config(dsn), "0004")
+
+    async def enabled() -> bool:
+        conn = await asyncpg.connect(dsn)
+        try:
+            return bool(await conn.fetchval("SELECT enabled FROM alarm_rules"))
+        finally:
+            await conn.close()
+
+    assert asyncio.run(enabled()) is False

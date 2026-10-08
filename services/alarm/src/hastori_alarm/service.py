@@ -247,7 +247,10 @@ class AlarmService:
     async def replay(self, rules: list[Rule], watermarks: dict[uuid.UUID, float]) -> None:
         if not rules:
             return
-        lookback = max(REPLAY_MIN_S, max(r.window_s or 0 for r in rules) + 60.0)
+        # A pending count that began before the restart must be rebuilt: look back over the longest
+        # rule duration or reactive window, not just the default.
+        longest = max(max(r.window_s or 0, r.duration_s) for r in rules)
+        lookback = max(REPLAY_MIN_S, longest + 60.0)
         devices = sorted({r.device_id for r in rules})
         samples = await self._retry(lambda: self._store.samples(devices, time.time() - lookback))
         for sample in samples:

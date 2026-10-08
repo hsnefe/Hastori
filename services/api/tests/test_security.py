@@ -1,5 +1,6 @@
 """Access tokens, password checks, the login limiter and refresh token rotation (Lua on Redis)."""
 
+import asyncio
 import time
 import uuid
 from typing import Any
@@ -110,6 +111,33 @@ async def test_password_verification() -> None:
     assert not await verify_password("wrong", h)
     assert not await verify_password("anything", None)  # no such user
     assert not await verify_password("anything", "not-a-hash")  # a value the seed never makes
+
+
+async def test_only_a_few_hashes_run_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each argon2 run needs 64 MiB and sign-in has no credentials: the rest must queue."""
+    import threading
+    import time
+
+    from hastori_api import security
+
+    running = peak = 0
+    lock = threading.Lock()
+
+    def slow_verify(password: str, password_hash: str) -> bool:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return False
+
+    monkeypatch.setattr(security, "_verify", slow_verify)
+    h = hash_password("x")
+    results = await asyncio.gather(*(verify_password("y", h) for _ in range(12)))
+    assert results == [False] * 12  # all of them are answered, none refused
+    assert 1 <= peak <= security.MAX_CONCURRENT_HASHES
 
 
 # -- login limiter ----------------------------------------------------------------------------

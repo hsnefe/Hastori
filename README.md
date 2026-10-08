@@ -193,8 +193,9 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
   into the broker (only `ca.crt`, `server.crt`, `server.key` are). `make certs` is idempotent and
   renews the server certificate 30 days before it expires; run it before every `make up` (it is
   part of it) or from a scheduled task, then restart mosquitto.
-- **Seed**: by default it never overwrites what people changed (user password hashes, alarm
-  rules, a site's time zone); `make seed-reset` does.
+- **Seed**: by default it never overwrites what people changed (users' e-mail, role and
+  password hash, a site's name, city and time zone, a device's name and active flag, alarm rules);
+  `make seed-reset` does.
 
 ### Alarm service (day 2)
 
@@ -219,8 +220,8 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
   twice. A database outage is retried, never dropped; a malformed message is rejected into the
   dead-letter queue (`alarm.telemetry.dlq`, bounded) instead of looping.
 - **Restart**: the service keeps no state that is not a function of stored data. At start it reads
-  the rules and the open alarms, then replays the last 15 minutes (or the longest reactive window)
-  of `measurements` through the same state machine. A transition a previous run already wrote is
+  the rules and the open alarms, then replays the last 15 minutes (or the longest rule duration or reactive window plus a
+  minute; `duration_s` is capped at 600 s) of `measurements` through the same state machine. A transition a previous run already wrote is
   recognised by a per-rule watermark and not written again; an alarm that is open in the database
   is adopted and not closed by data older than its opening; an alarm whose rule was disabled while
   the service was down is closed.
@@ -251,8 +252,8 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
   token still works for 20 s (two tabs refreshing at once get a token each); a use after that is a
   stolen copy and revokes the whole family. The cookie is httpOnly, `SameSite=Strict`, scoped to
   `/api/v1/auth` (`COOKIE_SECURE=true` behind HTTPS).
-- **Sign-in.** Argon2 verification runs in a thread and also for unknown users (same answer, same
-  cost); 5 failed attempts per e-mail address and client address block further attempts for 5
+- **Sign-in.** Argon2 verification runs in a thread, at most two at a time (each needs 64 MiB), and also for
+  unknown users (same answer, same cost); 5 failed attempts per e-mail address and client address block further attempts for 5
   minutes (429 with `Retry-After`).
 - **Acknowledging** is one conditional `UPDATE ... WHERE state = 'active'`: two people at once, or
   the alarm service closing the alarm meanwhile, give one winner and a 409.

@@ -775,3 +775,28 @@ async def test_sites_can_be_added_and_changed_by_the_system_admin(api: ApiHarnes
     assert (await admin.patch(f"/sites/{uuid.uuid4()}", json={"city": "x"})).status_code == 404
     actions = [r["action"] for r in await sql(api, "SELECT action FROM audit_log ORDER BY id")]
     assert actions == ["site.create", "site.update"]
+
+
+async def test_two_users_created_at_once_with_one_address_give_201_and_409(
+    api: ApiHarness,
+) -> None:
+    admin = await api.signed_in("admin")
+    body = {"email": "race@demo.hastori.local", "password": "a-long-enough-pw", "role": "viewer"}
+    results = await asyncio.gather(*(admin.post("/users", json=body) for _ in range(4)))
+    assert sorted(r.status_code for r in results) == [201, 409, 409, 409]
+
+
+async def test_daily_consumption_of_a_site_with_a_broken_time_zone_is_a_clear_error(
+    api: ApiHarness,
+) -> None:
+    await sql(api, "UPDATE sites SET timezone = 'Mars/Olympus' WHERE id = $1", IZMIR.id)
+    c = await api.signed_in("izmir_admin")
+    r = await c.get(f"/sites/{IZMIR.id}/consumption/daily")
+    assert r.status_code == 422 and "time zone" in r.json()["error"]["message"]
+
+
+async def test_a_rule_duration_is_capped_at_ten_minutes(api: ApiHarness) -> None:
+    c = await api.signed_in("izmir_admin")
+    body = {**RULE, "device_id": str(KOMP2.id)}
+    assert (await c.post("/alarm-rules", json={**body, "duration_s": 601})).status_code == 422
+    assert (await c.post("/alarm-rules", json={**body, "duration_s": 600})).status_code == 201

@@ -89,3 +89,37 @@ async def test_the_seed_satisfies_the_database_constraints(use_database: str) ->
     await conn.close()
     assert [r["kind"] for r in rows].count("reactive_ratio") == 2
     assert all(r["clear_threshold"] is not None for r in rows)
+
+
+async def test_a_plain_seed_keeps_people_changes_to_users_sites_and_devices(
+    use_database: str,
+) -> None:
+    seed = load_seed_script()
+    izmir = load_seed().site_by_key("izmir").id
+    await seed.main(reset=False)
+    conn = await asyncpg.connect(use_database)
+    await conn.execute("UPDATE users SET role = 'viewer' WHERE email LIKE 'izmir.admin@%'")
+    await conn.execute("UPDATE sites SET name = 'Renamed', city = 'Elsewhere' WHERE id = $1", izmir)
+    await conn.execute("UPDATE devices SET name = 'Renamed device' WHERE key = 'izmir-komp-1'")
+    await conn.execute("UPDATE devices SET is_active = false WHERE key = 'izmir-komp-2'")
+
+    await seed.main(reset=False)
+    assert (
+        await conn.fetchval("SELECT role FROM users WHERE email LIKE 'izmir.admin@%'") == "viewer"
+    )
+    assert await conn.fetchval("SELECT name FROM sites WHERE id = $1", izmir) == "Renamed"
+    assert await conn.fetchval("SELECT city FROM sites WHERE id = $1", izmir) == "Elsewhere"
+    assert await conn.fetchval("SELECT name FROM devices WHERE key = 'izmir-komp-1'") == (
+        "Renamed device"
+    )
+    assert not await conn.fetchval("SELECT is_active FROM devices WHERE key = 'izmir-komp-2'")
+
+    await seed.main(reset=True)  # the YAML wins again
+    assert await conn.fetchval("SELECT role FROM users WHERE email LIKE 'izmir.admin@%'") == (
+        "site_admin"
+    )
+    assert await conn.fetchval("SELECT name FROM sites WHERE id = $1", izmir) != "Renamed"
+    assert await conn.fetchval("SELECT name FROM devices WHERE key = 'izmir-komp-1'") != (
+        "Renamed device"
+    )
+    await conn.close()

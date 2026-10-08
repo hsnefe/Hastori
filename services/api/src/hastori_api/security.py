@@ -18,6 +18,24 @@ AUDIENCE = "hastori-api"
 _hasher = PasswordHash.recommended()
 _dummy_hash: str | None = None
 
+# One argon2 verification needs 64 MiB; sign-in is unauthenticated, so the number running at once
+# is capped (the container has a 384 MiB limit). The rest wait, they are not refused.
+MAX_CONCURRENT_HASHES = 2
+_hash_slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _slots() -> asyncio.Semaphore:
+    global _hash_slots
+    loop = asyncio.get_running_loop()
+    if _hash_slots is None or _hash_slots[0] is not loop:  # a semaphore belongs to one loop
+        _hash_slots = (loop, asyncio.Semaphore(MAX_CONCURRENT_HASHES))
+    return _hash_slots[1]
+
+
+async def hash_password_async(password: str) -> str:
+    async with _slots():
+        return await asyncio.to_thread(_hasher.hash, password)
+
 
 def issue_access_token(settings: Settings, user_id: uuid.UUID, now: float | None = None) -> str:
     iat = int(now if now is not None else time.time())
@@ -62,10 +80,12 @@ async def verify_password(password: str, password_hash: str | None) -> bool:
     global _dummy_hash
     if password_hash is None:
         if _dummy_hash is None:
-            _dummy_hash = await asyncio.to_thread(_hasher.hash, "hastori-no-such-user")
-        await asyncio.to_thread(_verify, password, _dummy_hash)
+            _dummy_hash = await hash_password_async("hastori-no-such-user")
+        async with _slots():
+            await asyncio.to_thread(_verify, password, _dummy_hash)
         return False
-    return await asyncio.to_thread(_verify, password, password_hash)
+    async with _slots():
+        return await asyncio.to_thread(_verify, password, password_hash)
 
 
 def _verify(password: str, password_hash: str) -> bool:
