@@ -112,6 +112,7 @@ class AlarmRule(Base):
         CheckConstraint("operator IN ('>','<')", name="ck_rules_operator"),
         CheckConstraint("severity IN ('warning','critical')", name="ck_rules_severity"),
         CheckConstraint("duration_s >= 0", name="ck_rules_duration"),
+        CheckConstraint("duration_s <= 600", name="ck_rules_duration_max"),
         CheckConstraint(
             "metric IN ('active_power_kw','reactive_power_kvar','current_a','temperature_c')",
             name="ck_rules_metric",
