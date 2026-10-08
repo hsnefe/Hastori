@@ -19,6 +19,11 @@ BATCH_SIZE = Histogram(
 PUBLISH_FAILURES = Counter(
     "ingest_publish_failures", "RabbitMQ publish failures", registry=REGISTRY
 )
+EVENT_PUBLISH_FAILURES = Counter(
+    "ingest_event_publish_failures",
+    "Live (Redis) events not published: Redis failed, or the event queue was full",
+    registry=REGISTRY,
+)
 OUTBOX_DEPTH = Gauge(
     "ingest_outbox_depth", "Events committed but not yet published", registry=REGISTRY
 )

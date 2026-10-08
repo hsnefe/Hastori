@@ -1,13 +1,17 @@
 """Ingestion wiring.
 
 MQTT (shared subscription, manual acks) -> bounded queue -> batch writer
--> one DB transaction (measurements + outbox) -> MQTT ack -> relay -> RabbitMQ.
+-> one DB transaction (measurements + outbox) -> MQTT ack -> relay -> RabbitMQ
+                                                           \-> Redis (live screens, best effort)
 
 Delivery guarantees:
 - A message is acked to the broker only after its DB transaction committed; after a crash the
   broker redelivers it and ON CONFLICT DO NOTHING absorbs the duplicate.
 - The RabbitMQ event is written to the outbox in the same transaction as the measurements, so
   an event can never be lost between "committed" and "published".
+- The Redis event for live screens is published after the commit, from its own task and queue.
+  It is a hint (a screen that misses one draws the next), so a Redis outage costs events, never
+  measurements: it can neither delay a write nor an ack.
 """
 
 import asyncio
@@ -28,8 +32,10 @@ from fastapi import FastAPI, Response
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis.asyncio import Redis
 
 from hastori_common.dberrors import PERMANENT_DB_ERRORS, RETRYABLE_DB_ERRORS
+from hastori_common.events import MeasurementEvent, channel
 from hastori_common.logging import configure_logging
 from hastori_common.messaging import routing_key
 from hastori_common.serve import Server
@@ -58,6 +64,10 @@ OUTBOX_MAX_AGE = "1 hour"
 RELAY_TIMEOUT_S = 60.0
 DB_COMMAND_TIMEOUT_S = 30.0
 REJECT_LOG_INTERVAL_S = 10.0
+# Live events wait here for the publisher task. A few minutes of a Redis outage fit; beyond that
+# the newest batches are dropped (and counted): a screen wants fresh data, not a replay.
+EVENT_QUEUE_SIZE = 1000
+EVENT_PUBLISH_TIMEOUT_S = 2.0
 
 INSERT_SQL = (
     "INSERT INTO measurements (time, device_id, metric, value) VALUES ($1, $2, $3, $4) "
@@ -95,6 +105,10 @@ class Ingestion:
         self.policy = BatchPolicy()
         self.publisher = Publisher(settings.rabbitmq_url)
         self.pool: asyncpg.Pool | None = None
+        self.redis: Redis | None = None
+        self.event_queue: asyncio.Queue[list[tuple[str, str]]] = asyncio.Queue(
+            maxsize=EVENT_QUEUE_SIZE
+        )
         # device_id -> (site_id, is_active)
         self.devices: dict[Any, tuple[Any, bool]] = {}
         self.state = State()
@@ -109,6 +123,7 @@ class Ingestion:
         self.deadline: float | None = None
         self.tasks: list[asyncio.Task[Any]] = []
         self._reject_logged: dict[str, float] = {}
+        self._event_error_logged = -REJECT_LOG_INTERVAL_S
 
     # -- device cache -----------------------------------------------------------------------
     async def refresh_devices(self) -> None:
@@ -364,12 +379,57 @@ class Ingestion:
                     )
                     self.ack([p])
         self.ack(good)
+        self.queue_events(good)
         metrics.BATCH_SIZE.observe(len(good))
         committed = time.time()
         for p in good:
             if p.item is not None:
                 metrics.LAG.observe(max(0.0, committed - p.item.ts))
         self.relay_wakeup.set()
+
+    # -- committed samples -> Redis (live screens) -------------------------------------------
+    def queue_events(self, batch: list[Pending]) -> None:
+        """Hand a committed batch to the publisher task. Never waits, never raises."""
+        if self.redis is None:
+            return
+        events = [
+            (
+                channel(p.item.site_id),
+                MeasurementEvent(
+                    device_id=p.item.device_id, ts=p.item.ts, metrics=p.item.metrics
+                ).model_dump_json(),
+            )
+            for p in batch
+            if p.item is not None
+        ]
+        if not events:
+            return
+        try:
+            self.event_queue.put_nowait(events)
+        except asyncio.QueueFull:
+            metrics.EVENT_PUBLISH_FAILURES.inc(len(events))
+
+    async def publish_events(self, events: list[tuple[str, str]]) -> None:
+        assert self.redis is not None
+        try:
+            async with self.redis.pipeline(transaction=False) as pipe:
+                for chan, body in events:
+                    pipe.publish(chan, body)
+                await asyncio.wait_for(pipe.execute(), EVENT_PUBLISH_TIMEOUT_S)
+        except Exception as exc:
+            metrics.EVENT_PUBLISH_FAILURES.inc(len(events))
+            now = time.monotonic()
+            if now - self._event_error_logged >= REJECT_LOG_INTERVAL_S:
+                self._event_error_logged = now
+                log.warning(
+                    "live events not published (logged at most once per %.0f s)",
+                    REJECT_LOG_INTERVAL_S,
+                    extra={"error": str(exc), "events": len(events)},
+                )
+
+    async def event_loop(self) -> None:
+        while True:
+            await self.publish_events(await self.event_queue.get())
 
     # -- outbox -> RabbitMQ -----------------------------------------------------------------
     async def relay_once(self) -> bool:
@@ -458,7 +518,9 @@ def build_api(app: Ingestion) -> FastAPI:
 
 
 async def run() -> None:
-    settings = get_settings(strict=("database_url", "mqtt_ingestion_password", "rabbitmq_url"))
+    settings = get_settings(
+        strict=("database_url", "mqtt_ingestion_password", "rabbitmq_url", "redis_url")
+    )
     configure_logging(settings.log_level)
     app = Ingestion(settings)
     dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
@@ -483,6 +545,14 @@ async def run() -> None:
             await asyncio.sleep(backoff)
             backoff = min(BACKOFF_MAX_S, backoff * 2)
     log.info("devices loaded", extra={"count": len(app.devices)})
+    # Lazy: nothing connects until the first publish, so a Redis that is down at start-up costs
+    # events (counted), never the service.
+    app.redis = Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=EVENT_PUBLISH_TIMEOUT_S,
+        socket_connect_timeout=EVENT_PUBLISH_TIMEOUT_S,
+    )
 
     server = Server(
         uvicorn.Config(
@@ -494,7 +564,8 @@ async def run() -> None:
     writer_task = asyncio.create_task(app.writer_loop(), name="writer")
     relay_task = asyncio.create_task(app.relay_loop(), name="relay")
     sub_task = asyncio.create_task(app.subscriber_loop(), name="subscriber")
-    app.tasks = [http_task, cache_task, writer_task, relay_task, sub_task]
+    events_task = asyncio.create_task(app.event_loop(), name="events")
+    app.tasks = [http_task, cache_task, writer_task, relay_task, sub_task, events_task]
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -524,9 +595,10 @@ async def run() -> None:
     await writer_task
     with contextlib.suppress(Exception):
         await app.relay_once()  # best effort; the outbox survives a restart anyway
-    for task in (cache_task, relay_task):
+    for task in (cache_task, relay_task, events_task):
         task.cancel()
-    await asyncio.gather(cache_task, relay_task, return_exceptions=True)
+    await asyncio.gather(cache_task, relay_task, events_task, return_exceptions=True)
+    await app.redis.aclose()
     server.should_exit = True
     await http_task
     await app.publisher.close()

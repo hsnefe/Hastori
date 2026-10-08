@@ -497,6 +497,7 @@ dependencies = [
     { name = "hastori-common" },
     { name = "paho-mqtt" },
     { name = "prometheus-client" },
+    { name = "redis" },
     { name = "uvicorn" },
 ]
 
@@ -509,6 +510,7 @@ requires-dist = [
     { name = "hastori-common", editable = "packages/common" },
     { name = "paho-mqtt", specifier = ">=2.1,<3" },
     { name = "prometheus-client", specifier = ">=0.20" },
+    { name = "redis", specifier = ">=5.2" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

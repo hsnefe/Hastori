@@ -128,6 +128,8 @@ services:
       MQTT_INGESTION_USER: ${MQTT_INGESTION_USER}
       MQTT_INGESTION_PASSWORD: ${MQTT_INGESTION_PASSWORD}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      # Live events for the screens: best effort, so ingestion does not wait for Redis to start.
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       INGEST_HTTP_PORT: "8001"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # The broker uses the MQTT user name as the client id (use_username_as_clientid), so this
