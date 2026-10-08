@@ -346,7 +346,7 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
 
 `make test` needs no Docker: it starts a real PostgreSQL (the `pgserver` package) and a Redis that
 runs Lua (`fakeredis`), builds the schema with the real migrations and runs the services against
-them: about 330 Python tests (plus 65 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
+them: about 300 Python tests (plus 65 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
 virtual time including a restart after every possible sample; the authorization matrix; refresh
 token rotation under parallel requests). What this cannot show is TimescaleDB itself (migration
 `0002` is replaced by a plain table and view with the same columns), RabbitMQ, the MQTT broker and

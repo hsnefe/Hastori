@@ -58,7 +58,11 @@
 	}
 
 	handle /api/* {
-		reverse_proxy api:8000
+		reverse_proxy api:8000 {
+			# Caddy resolves the real client (CF-Connecting-IP, X-Forwarded-For from a trusted
+			# proxy); by default it would only append its own peer to whatever header came in.
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	handle {

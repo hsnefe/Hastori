@@ -77,3 +77,11 @@ def test_every_long_running_service_restarts_on_its_own() -> None:
     for name, svc in services.items():
         if name not in one_shot:
             assert svc.get("restart") == "unless-stopped", name
+
+
+def test_caddy_passes_the_resolved_client_address_to_the_api() -> None:
+    """Without it the sign-in limiter sees Caddy's address (or whatever the client wrote)."""
+    caddyfile = (ROOT / "infra" / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "client_ip_headers CF-Connecting-IP X-Forwarded-For" in caddyfile
+    assert "header_up X-Forwarded-For {client_ip}" in caddyfile
+    assert caddyfile.count("delete ticket") == 2  # default and access log both redact it
