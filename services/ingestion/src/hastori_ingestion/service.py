@@ -1,4 +1,4 @@
-"""Ingestion wiring.
+r"""Ingestion wiring.
 
 MQTT (shared subscription, manual acks) -> bounded queue -> batch writer
 -> one DB transaction (measurements + outbox) -> MQTT ack -> relay -> RabbitMQ
@@ -61,6 +61,7 @@ SESSION_EXPIRY_S = 3600
 BACKOFF_MAX_S = 30.0
 OUTBOX_BATCH = 500
 OUTBOX_MAX_AGE = "1 hour"
+OUTBOX_EXPIRY_EVERY_S = 60.0
 RELAY_TIMEOUT_S = 60.0
 DB_COMMAND_TIMEOUT_S = 30.0
 REJECT_LOG_INTERVAL_S = 10.0
@@ -122,6 +123,7 @@ class Ingestion:
         self._drained = False
         self.deadline: float | None = None
         self.tasks: list[asyncio.Task[Any]] = []
+        self._last_expiry = float("-inf")
         self._reject_logged: dict[str, float] = {}
         self._event_error_logged = -REJECT_LOG_INTERVAL_S
 
@@ -437,16 +439,21 @@ class Ingestion:
 
         No database transaction (and so no row lock) is held while talking to RabbitMQ: a stalled
         broker (memory/disk alarm) must not pin a connection or block vacuum. If two replicas
-        publish the same row, the consumer drops the duplicate by message id.
+        publish the same row the alarm service sees the reading twice and drops the second by its
+        timestamp.
         """
         assert self.pool is not None
-        expired = await self.pool.execute(
-            f"DELETE FROM outbox WHERE created_at < now() - interval '{OUTBOX_MAX_AGE}'"  # noqa: S608
-        )
-        n_expired = int(expired.split()[-1])
-        if n_expired:
-            metrics.OUTBOX_EXPIRED.inc(n_expired)
-            log.error("outbox events expired", extra={"n": n_expired})
+        now = time.monotonic()
+        if now - self._last_expiry >= OUTBOX_EXPIRY_EVERY_S:
+            # outbox has no index on created_at: a scan once a minute, not at every wake-up
+            self._last_expiry = now
+            expired = await self.pool.execute(
+                f"DELETE FROM outbox WHERE created_at < now() - interval '{OUTBOX_MAX_AGE}'"  # noqa: S608
+            )
+            n_expired = int(expired.split()[-1])
+            if n_expired:
+                metrics.OUTBOX_EXPIRED.inc(n_expired)
+                log.error("outbox events expired", extra={"n": n_expired})
         rows = await self.pool.fetch(
             "SELECT id, message_id, routing_key, body FROM outbox ORDER BY id LIMIT $1",
             OUTBOX_BATCH,
@@ -458,7 +465,11 @@ class Ingestion:
         )
         if done:
             await self.pool.execute("DELETE FROM outbox WHERE id = ANY($1::bigint[])", done)
-        metrics.OUTBOX_DEPTH.set(await self.pool.fetchval("SELECT count(*) FROM outbox"))
+        # The backlog from the primary key (an index read), not count(*) over a table that grows
+        # while the broker is away. Ids are not gap-free, so this is an upper bound.
+        newest = await self.pool.fetchval("SELECT max(id) FROM outbox")
+        oldest = await self.pool.fetchval("SELECT min(id) FROM outbox")
+        metrics.OUTBOX_DEPTH.set(0 if newest is None else newest - oldest + 1)
         return len(rows) == OUTBOX_BATCH and len(done) == len(rows)
 
     async def relay_loop(self) -> None:

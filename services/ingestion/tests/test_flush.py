@@ -11,7 +11,7 @@ from hastori_ingestion.parsing import Telemetry, message_id
 from hastori_ingestion.service import Ingestion, Pending
 
 
-def test_settings() -> Settings:
+def make_settings() -> Settings:
     """Never the developer's .env: the tests must give the same result everywhere."""
     return Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -27,7 +27,7 @@ class Harness(Ingestion):
     """Ingestion with `_write` scripted: items in `poison` fail permanently."""
 
     def __init__(self) -> None:
-        super().__init__(test_settings())
+        super().__init__(make_settings())
         self.poison: set[int] = set()
         self.transient_failures = 0
         self.acked: list[int] = []
@@ -143,7 +143,7 @@ async def test_real_ack_goes_to_the_current_connection_only() -> None:
     class FakeClient:
         _client = FakePaho()
 
-    app = Ingestion(test_settings())
+    app = Ingestion(make_settings())
     app._client = FakeClient()  # type: ignore[assignment]
     app.generation = 2
     app.ack([pending(1, generation=1), pending(2, generation=2)])
@@ -153,7 +153,7 @@ async def test_real_ack_goes_to_the_current_connection_only() -> None:
 def test_rejection_log_is_rate_limited(caplog: pytest.LogCaptureFixture) -> None:
     from hastori_ingestion.parsing import Rejected
 
-    app = Ingestion(test_settings())
+    app = Ingestion(make_settings())
     with caplog.at_level("WARNING", logger="ingestion"):
         for _ in range(1000):
             app._log_rejected(Rejected("stale_ts"), "t")
@@ -173,7 +173,7 @@ def test_healthz_fails_when_a_background_loop_died() -> None:
         def get_name(self) -> str:
             return "writer"
 
-    app = Ingestion(test_settings())
+    app = Ingestion(make_settings())
     healthz = next(r.endpoint for r in build_api(app).routes if r.path == "/healthz")  # type: ignore[attr-defined]
     ok = Response()
     assert healthz(ok) == {"status": "ok"}
