@@ -34,6 +34,11 @@ export function formatMetric(metric: Metric, value: number): string {
   return `${formatNumber(value, m.digits)} ${m.unit}`;
 }
 
+/** A rule's value: a measured quantity with its unit, or (reactive_ratio rules) a plain ratio. */
+export function formatRuleValue(kind: "threshold" | "reactive_ratio", metric: Metric, value: number): string {
+  return kind === "reactive_ratio" ? formatNumber(value, 3) : formatMetric(metric, value);
+}
+
 export function formatPercent(fraction: number): string {
   return new Intl.NumberFormat(LOCALE, { style: "percent", maximumFractionDigits: 0 }).format(fraction);
 }

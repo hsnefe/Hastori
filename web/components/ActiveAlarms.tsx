@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { useAcknowledge, useOpenAlarms } from "@/lib/alarms";
-import { ALARM_STATES, formatDateTime, formatMetric, SEVERITIES } from "@/lib/format";
+import { ALARM_STATES, formatDateTime, SEVERITIES } from "@/lib/format";
 import { canWrite, useSession } from "@/lib/session";
 import type { Alarm } from "@/lib/types";
 
@@ -81,7 +81,6 @@ function AlarmRow({
         </Link>
         <span className="muted">
           {alarm.device_name} · {formatDateTime(alarm.opened_at, timeZone)}
-          {alarm.peak_value !== null ? ` · tepe ${formatMetric(alarm.metric, alarm.peak_value)}` : ""}
         </span>
       </div>
       <div className="alarm-actions">

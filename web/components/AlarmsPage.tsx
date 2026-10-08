@@ -9,7 +9,7 @@ import {
   ALARM_STATES,
   formatDateTime,
   formatDuration,
-  formatMetric,
+  formatRuleValue,
   METRICS,
   SEVERITIES,
   zoneLabel,
@@ -161,11 +161,11 @@ function AlarmDetailPanel({ alarmId, timeZone, onClose }: { alarmId: string; tim
             <dt>Durum</dt>
             <dd>{ALARM_STATES[a.state]}</dd>
             <dt>Tepe değer</dt>
-            <dd>{a.peak_value !== null ? formatMetric(a.metric, a.peak_value) : "—"}</dd>
+            <dd>{a.peak_value !== null ? formatRuleValue(a.rule.kind, a.metric, a.peak_value) : "—"}</dd>
             <dt>Açılıştaki eşik</dt>
             <dd>
               {a.threshold !== null && a.clear_threshold !== null
-                ? `${a.rule.operator} ${formatMetric(a.metric, a.threshold)} (kapanma eşiği ${formatMetric(a.metric, a.clear_threshold)})`
+                ? `${a.rule.operator} ${formatRuleValue(a.rule.kind, a.metric, a.threshold)} (kapanma eşiği ${formatRuleValue(a.rule.kind, a.metric, a.clear_threshold)})`
                 : "Kayıtlı değil (alarm bu özellikten önce açıldı)"}
             </dd>
             {a.rule.kind === "reactive_ratio" ? (

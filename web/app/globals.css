@@ -544,6 +544,9 @@ form.card label {
 .alarm-row.alarm-warning {
   border-left-color: var(--warn);
 }
+.alarm-main > .sev {
+  justify-self: start;
+}
 .alarm-main {
   display: grid;
   gap: 0.1rem;
