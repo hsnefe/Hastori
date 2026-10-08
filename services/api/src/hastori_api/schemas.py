@@ -19,7 +19,11 @@ Severity = Literal["warning", "critical"]
 AlarmState = Literal["active", "acknowledged", "cleared"]
 Metric = Literal["active_power_kw", "reactive_power_kvar", "current_a", "temperature_c"]
 Interval = Literal["auto", "raw", "1m", "1h"]
-RuleKind = Literal["threshold", "reactive_ratio"]
+RuleKind = Literal["threshold", "reactive_ratio", "no_data"]
+
+# A no_data rule: how long a metric may stay absent. Devices publish every 2 s, so less than 10 s
+# would alarm on a single lost message.
+NO_DATA_MIN_S = 10
 
 MAX_PAGE_SIZE = 100
 # Not EmailStr: its validator refuses the reserved `.local` names the demo users have.
@@ -167,13 +171,19 @@ class RuleBody(BaseModel):
     name: str = Field(min_length=1, max_length=120, examples=["Kompresör-1 yüksek sıcaklık"])
     kind: RuleKind = "threshold"
     metric: Metric
-    operator: Literal[">", "<"]
-    threshold: float
+    operator: Literal[">", "<"] = Field(description="no_data rules take '>' (left out: '>')")
+    threshold: float = Field(description="no_data rules have none (left out: 0)")
     clear_threshold: float = Field(
         description="the alarm closes only past this value (hysteresis); on the right side of "
-        "the threshold: at or below it for '>', at or above it for '<'"
+        "the threshold: at or below it for '>', at or above it for '<'. no_data rules have none "
+        "(left out: 0): they close after the metric has been arriving again for 10 seconds"
     )
-    duration_s: int = Field(ge=0, le=600, description="how long the breach must last")
+    duration_s: int = Field(
+        ge=0,
+        le=600,
+        description="how long the breach must last; for no_data how long the metric may stay "
+        f"absent ({NO_DATA_MIN_S} to 600)",
+    )
     window_s: int | None = Field(
         default=None, description="reactive_ratio only: sliding window, 60 to 3600 seconds"
     )
@@ -182,8 +192,24 @@ class RuleBody(BaseModel):
 
     _finite_numbers = field_validator("threshold", "clear_threshold")(_finite)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _no_data_has_no_threshold(cls, data: object) -> object:
+        """A silence rule is not about a value: the fields that describe one may be left out."""
+        if isinstance(data, dict) and data.get("kind") == "no_data":
+            return {"operator": ">", "threshold": 0, "clear_threshold": 0, **data}
+        return data
+
     @model_validator(mode="after")
     def _consistent(self) -> "RuleBody":
+        if self.kind == "no_data":
+            if self.operator != ">" or self.threshold != 0 or self.clear_threshold != 0:
+                raise ValueError("a no_data rule has no threshold: leave the threshold fields out")
+            if self.duration_s < NO_DATA_MIN_S:
+                raise ValueError(f"a no_data rule needs duration_s of at least {NO_DATA_MIN_S}")
+            if self.window_s is not None:
+                raise ValueError("window_s applies to reactive_ratio rules only")
+            return self
         if self.operator == ">" and self.clear_threshold > self.threshold:
             raise ValueError("clear_threshold must not be above threshold for operator '>'")
         if self.operator == "<" and self.clear_threshold < self.threshold:

@@ -39,7 +39,7 @@ async def test_seed_loads_everything_and_is_idempotent(use_database: str) -> Non
     seed = load_seed_script()
     await seed.main(reset=False)
     first = await snapshot(use_database)
-    assert len(first["rules"]) == len(load_seed().alarm_rules) == 4
+    assert len(first["rules"]) == len(load_seed().alarm_rules) == 5
     assert len(first["users"]) == 5
 
     await seed.main(reset=False)
@@ -51,7 +51,8 @@ async def test_a_plain_seed_keeps_what_people_changed(use_database: str) -> None
     await seed.main(reset=False)
     conn = await asyncpg.connect(use_database)
     await conn.execute(
-        "UPDATE alarm_rules SET threshold = 99, clear_threshold = 90 WHERE name LIKE 'Kompres%'"
+        "UPDATE alarm_rules SET threshold = 99, clear_threshold = 90 "
+        "WHERE name LIKE 'Kompres%' AND kind = 'threshold'"
     )
     await conn.execute("UPDATE users SET password_hash = 'changed' WHERE role = 'system_admin'")
     await conn.execute("UPDATE sites SET timezone = 'Europe/Berlin'")
@@ -59,7 +60,12 @@ async def test_a_plain_seed_keeps_what_people_changed(use_database: str) -> None
 
     await seed.main(reset=False)
     conn = await asyncpg.connect(use_database)
-    assert await conn.fetchval("SELECT threshold FROM alarm_rules WHERE name LIKE 'Kompres%'") == 99
+    assert (
+        await conn.fetchval(
+            "SELECT threshold FROM alarm_rules WHERE name LIKE 'Kompres%' AND kind = 'threshold'"
+        )
+        == 99
+    )
     assert (
         await conn.fetchval("SELECT password_hash FROM users WHERE role = 'system_admin'")
         == "changed"
@@ -69,7 +75,12 @@ async def test_a_plain_seed_keeps_what_people_changed(use_database: str) -> None
     }
 
     await seed.main(reset=True)  # YAML wins again
-    assert await conn.fetchval("SELECT threshold FROM alarm_rules WHERE name LIKE 'Kompres%'") == 80
+    assert (
+        await conn.fetchval(
+            "SELECT threshold FROM alarm_rules WHERE name LIKE 'Kompres%' AND kind = 'threshold'"
+        )
+        == 80
+    )
     assert (
         await conn.fetchval("SELECT password_hash FROM users WHERE role = 'system_admin'")
         != "changed"

@@ -8,7 +8,7 @@ def test_seed_shape() -> None:
     assert len(seed.sites) == 2
     assert len(seed.devices) == 7
     assert len(seed.users) == 5
-    assert len(seed.alarm_rules) == 4
+    assert len(seed.alarm_rules) == 5
     assert len({seed.topic(d) for d in seed.devices}) == 7
 
 
@@ -36,6 +36,9 @@ def test_seed_rules_satisfy_the_database_constraints() -> None:
             assert seed.device_by_key(r.device).type == "energy_analyzer", r.name
         else:
             assert r.window_s is None, r.name
+        if r.kind == "no_data":  # migration 0008: no thresholds, 10 to 600 seconds
+            assert (r.operator, r.threshold, r.clear_threshold) == (">", 0, 0), r.name
+            assert 10 <= r.duration_s <= 600, r.name
         key = (r.device, r.metric, r.kind)
         assert key not in seen, f"two rules for {key}"
         seen.add(key)

@@ -45,7 +45,10 @@ async def list_rules(
         "`clear_threshold` is required: the alarm opens above `threshold` (for '>') after "
         "`duration_s` seconds and closes only below `clear_threshold`. A `reactive_ratio` rule "
         "watches the ratio of reactive to active energy over `window_s` seconds and belongs on "
-        "an energy analyzer."
+        "an energy analyzer. A `no_data` rule opens when `metric` has not arrived for "
+        "`duration_s` seconds (10 to 600) and needs no threshold fields; it stays quiet while "
+        "the whole pipeline is silent, so an outage of the broker or ingestion is not blamed on "
+        "the device."
     ),
     responses=CONFLICT,
 )

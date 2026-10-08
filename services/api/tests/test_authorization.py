@@ -24,7 +24,7 @@ API_SRC = Path(__file__).resolve().parents[1] / "src" / "hastori_api"
 
 async def add_alarm(dsn: str, rule_key: str, device_key: str) -> str:
     """An open alarm for one of the seeded rules."""
-    rule = next(r for r in SEED.alarm_rules if r.device == rule_key)
+    rule = next(r for r in SEED.alarm_rules if r.device == rule_key and r.kind != "no_data")
     device = SEED.device_by_key(device_key)
     alarm_id = uuid.uuid4()
     conn = await asyncpg.connect(dsn)

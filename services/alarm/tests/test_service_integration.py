@@ -27,7 +27,7 @@ from hastori_common.settings import Settings
 SEED = load_seed()
 DEVICE = SEED.device_by_key("izmir-komp-1")
 SITE = SEED.site_by_key("izmir")
-RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-komp-1")
+RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-komp-1" and r.kind == "threshold")
 STEP = 2.0
 
 
@@ -570,7 +570,7 @@ async def test_an_alarm_keeps_the_thresholds_it_opened_with(
     await insert_series(seeded, start, [85.0] * 40)
     await (await new_service(seeded, fake_redis)).startup()
     await seeded.execute(
-        "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85"
+        "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85 WHERE id = $1", RULE.id
     )  # edited later
     (alarm,) = await alarms(seeded)
     assert alarm["threshold"] == RULE.threshold and alarm["clear_threshold"] == RULE.clear_threshold

@@ -82,6 +82,82 @@ async def test_constraints_of_0005(db_dsn: str) -> None:
         await conn.close()
 
 
+async def test_constraints_of_0008(db_dsn: str) -> None:
+    """A silence rule: operator '>', no thresholds, 10 to 600 seconds, no window."""
+    conn = await asyncpg.connect(db_dsn)
+    sql = (
+        "INSERT INTO alarm_rules (id, device_id, name, metric, operator, threshold, duration_s, "
+        "clear_threshold, severity, kind, window_s) "
+        "VALUES ($1, $2, 'r', $3, $4, $5, $6, $7, 'warning', 'no_data', $8)"
+    )
+
+    async def silence(
+        metric: str = "temperature_c",
+        operator: str = ">",
+        threshold: float = 0,
+        duration_s: int = 60,
+        clear_threshold: float = 0,
+        window_s: int | None = None,
+    ) -> None:
+        await conn.execute(
+            sql, uuid.uuid4(), DEVICE, metric, operator, threshold, duration_s, clear_threshold,
+            window_s,
+        )  # fmt: skip
+
+    try:
+        await seed_device(conn)
+        await silence()
+        for bad in (
+            {"metric": "current_a", "duration_s": 9},  # a single lost message would trip it
+            {"metric": "current_a", "duration_s": 601},
+            {"metric": "current_a", "threshold": 80, "clear_threshold": 75},
+            {"metric": "current_a", "operator": "<"},
+            {"metric": "current_a", "window_s": 600},
+        ):
+            with pytest.raises(asyncpg.CheckViolationError):
+                await silence(**bad)
+        await silence(metric="current_a", duration_s=10)
+        with pytest.raises(asyncpg.UniqueViolationError):  # one silence rule per device and metric
+            await silence()
+        await add_rule(conn)  # a threshold rule on the same metric is a different kind
+    finally:
+        await conn.close()
+
+
+def test_downgrading_switches_no_data_rules_off(pg_uri: str, template_db: str) -> None:
+    """Without the kind a silence rule would read as "metric > 0" and alarm forever."""
+    name = f"t_{uuid.uuid4().hex[:12]}"
+
+    async def prepare() -> None:
+        conn = await asyncpg.connect(with_database(pg_uri, "postgres"))
+        await conn.execute(f'CREATE DATABASE "{name}" TEMPLATE "{template_db}"')
+        await conn.close()
+        conn = await asyncpg.connect(with_database(pg_uri, name))
+        await seed_device(conn)
+        await conn.execute(
+            "INSERT INTO alarm_rules (id, device_id, name, metric, operator, threshold, "
+            "clear_threshold, duration_s, severity, kind) VALUES "
+            "($1, $2, 'silence', 'temperature_c', '>', 0, 0, 60, 'warning', 'no_data')",
+            uuid.uuid4(),
+            DEVICE,
+        )
+        await conn.close()
+
+    asyncio.run(prepare())
+    dsn = with_database(pg_uri, name)
+    command.downgrade(alembic_config(dsn), "0007")
+
+    async def enabled() -> bool:
+        conn = await asyncpg.connect(dsn)
+        try:
+            return bool(await conn.fetchval("SELECT enabled FROM alarm_rules"))
+        finally:
+            await conn.close()
+
+    assert asyncio.run(enabled()) is False
+    command.upgrade(alembic_config(dsn), "head")  # and back up with the row still there
+
+
 async def test_one_open_alarm_per_rule(db_dsn: str) -> None:
     conn = await asyncpg.connect(db_dsn)
     try:

@@ -50,6 +50,8 @@ PREFETCH = 200
 LIVE_WITHIN_S = 60.0  # a reading this close to the wall clock is live, not queued
 RELOAD_INTERVAL_S = 60.0
 LISTEN_CHECK_S = 5.0
+# How often silent devices (no_data rules) are looked for between messages.
+SILENCE_CHECK_S = 5.0
 # A second replica waits as a standby (single active consumer) and may become active hours after
 # it started. If nothing was processed for this long, the engine may be missing everything the
 # other replica did: rebuild it from the database before the first message.
@@ -310,6 +312,25 @@ class AlarmService:
             except Exception as exc:
                 log.warning("reload failed", extra={"error": str(exc)})
 
+    async def silence_loop(self) -> None:
+        """A silent device sends no message that could trigger its alarm: look at the clock."""
+        while True:
+            await asyncio.sleep(SILENCE_CHECK_S)
+            try:
+                async with self.lock:
+                    if self._dirty:
+                        continue  # the next message rebuilds the engine first
+                    for t in self.engine.tick(time.time()):
+                        await self.apply(t)
+            except Stopping:
+                return
+            except PERMANENT_DB_ERRORS as exc:
+                self._dirty = True  # the engine moved ahead of the database: rebuild it
+                log.error("silence check dropped by database", extra={"error": str(exc)})
+            except Exception as exc:
+                self._dirty = True
+                log.warning("silence check failed", extra={"error": str(exc)})
+
     async def listen_loop(self, dsn: str) -> None:
         """Keep a connection LISTENing for rule and device changes; reconnect when it drops."""
         listener: asyncpg.Connection | None = None
@@ -364,7 +385,7 @@ class AlarmService:
         try:
             async with self.lock:
                 jumps = self.engine.clock_jumps
-                transitions = self.engine.feed(sample)
+                transitions = self.engine.feed(sample, arrived=time.time())
                 if self.engine.clock_jumps > jumps:
                     metrics.CLOCK_JUMPS.inc(self.engine.clock_jumps - jumps)
                     log.warning("device clock set back", extra={"device_id": str(event.device_id)})
@@ -521,8 +542,9 @@ async def run() -> None:
         asyncio.create_task(app.listen_loop(dsn), name="listener"),
         asyncio.create_task(app.reload_loop(), name="reload"),
         asyncio.create_task(app.consumer_loop(), name="consumer"),
+        asyncio.create_task(app.silence_loop(), name="silence"),
     ]
-    http_task, listen_task, reload_task, consumer_task = app.tasks
+    http_task, listen_task, reload_task, consumer_task, silence_task = app.tasks
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -549,9 +571,9 @@ async def run() -> None:
     log.info("shutting down")
     app.deadline = time.monotonic() + settings.alarm_shutdown_deadline_s
     await consumer_task  # finishes the message in hand, stops consuming, closes the connection
-    for task in (listen_task, reload_task):
+    for task in (listen_task, reload_task, silence_task):
         task.cancel()
-    await asyncio.gather(listen_task, reload_task, return_exceptions=True)
+    await asyncio.gather(listen_task, reload_task, silence_task, return_exceptions=True)
     server.should_exit = True
     await http_task
     if app.redis is not None:

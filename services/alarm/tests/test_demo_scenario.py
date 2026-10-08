@@ -72,7 +72,9 @@ def kinds(site: Site, rule_id: uuid.UUID) -> list[str]:
     return [t.kind for t in site.transitions if t.rule.id == rule_id]
 
 
-TEMP_RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-komp-1")
+TEMP_RULE = next(
+    r for r in SEED.alarm_rules if r.device == "izmir-komp-1" and r.kind == "threshold"
+)
 RATIO_RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-pano")
 
 

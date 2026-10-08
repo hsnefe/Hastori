@@ -63,7 +63,7 @@ class RuleSeed(BaseModel):
     duration_s: int
     clear_threshold: float
     severity: str
-    kind: Literal["threshold", "reactive_ratio"] = "threshold"
+    kind: Literal["threshold", "reactive_ratio", "no_data"] = "threshold"
     window_s: int | None = None
 
 

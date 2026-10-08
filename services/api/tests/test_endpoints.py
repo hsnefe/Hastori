@@ -22,7 +22,10 @@ KOMP1 = SEED.device_by_key("izmir-komp-1")
 KOMP2 = SEED.device_by_key("izmir-komp-2")
 SOGUTMA = SEED.device_by_key("izmir-sogutma-1")
 PANO = SEED.device_by_key("izmir-pano")
-TEMP_RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-komp-1")
+SILENCE_RULE = next(r for r in SEED.alarm_rules if r.kind == "no_data")
+TEMP_RULE = next(
+    r for r in SEED.alarm_rules if r.device == "izmir-komp-1" and r.kind == "threshold"
+)
 
 
 async def sql(api: ApiHarness, query: str, *args: Any) -> list[asyncpg.Record]:
@@ -439,7 +442,9 @@ async def test_an_alarm_detail_shows_the_thresholds_it_opened_with(api: ApiHarne
         "UPDATE alarms SET threshold = 80, clear_threshold = 75 WHERE id = $1",
         uuid.UUID(alarm),
     )
-    await sql(api, "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85")  # edited since
+    await sql(
+        api, "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85 WHERE kind = 'threshold'"
+    )  # edited since
     c = await api.signed_in("izmir_viewer")
     body = (await c.get(f"/alarms/{alarm}")).json()
     assert (body["threshold"], body["clear_threshold"]) == (80, 75)
@@ -524,11 +529,11 @@ RULE = {
 async def test_rules_are_listed_for_the_sites_of_the_admin(api: ApiHarness) -> None:
     izmir = await api.signed_in("izmir_admin")
     r = (await izmir.get("/alarm-rules")).json()
-    assert r["total"] == 3 and {x["site_id"] for x in r["items"]} == {str(IZMIR.id)}
+    assert r["total"] == 4 and {x["site_id"] for x in r["items"]} == {str(IZMIR.id)}
     admin = await api.signed_in("admin")
-    assert (await admin.get("/alarm-rules")).json()["total"] == 4
+    assert (await admin.get("/alarm-rules")).json()["total"] == 5
     only = (await admin.get("/alarm-rules", params={"device_id": str(KOMP1.id)})).json()
-    assert [x["name"] for x in only["items"]] == [TEMP_RULE.name]
+    assert {x["name"] for x in only["items"]} == {TEMP_RULE.name, SILENCE_RULE.name}
     assert (await admin.get("/alarm-rules", params={"enabled": "false"})).json()["total"] == 0
     assert (await izmir.get("/alarm-rules", params={"site_id": str(ANTALYA.id)})).status_code == 404
 
@@ -657,6 +662,49 @@ async def test_a_ratio_rule_on_the_main_panel_is_accepted(api: ApiHarness) -> No
     }  # fmt: skip
     r = await c.post("/alarm-rules", json=body)
     assert r.status_code == 201 and r.json()["window_s"] == 900
+
+
+async def test_a_no_data_rule_needs_no_threshold(api: ApiHarness) -> None:
+    c = await api.signed_in("izmir_admin")
+    body = {
+        "device_id": str(KOMP2.id), "name": "Kompresör-2 veri yok", "kind": "no_data",
+        "metric": "temperature_c", "duration_s": 60, "severity": "warning",
+    }  # fmt: skip
+    r = await c.post("/alarm-rules", json=body)
+    assert r.status_code == 201, r.text
+    rule = r.json()
+    assert rule["kind"] == "no_data" and rule["duration_s"] == 60 and rule["window_s"] is None
+    assert (rule["operator"], rule["threshold"], rule["clear_threshold"]) == (">", 0, 0)
+    assert (await c.get(f"/alarm-rules/{rule['id']}")).json() == rule
+
+    changed = await c.put(f"/alarm-rules/{rule['id']}", json={**body, "duration_s": 120})
+    assert changed.status_code == 200 and changed.json()["duration_s"] == 120
+
+    # it sits next to a threshold rule on the same metric: the unique index is per kind
+    other = await c.post("/alarm-rules", json={**RULE, "device_id": str(KOMP2.id)})
+    assert other.status_code == 201
+    again = await c.post("/alarm-rules", json={**body, "name": "Kompresör-2 veri yok (ikinci)"})
+    assert again.status_code == 409
+
+
+async def test_no_data_rule_validation(api: ApiHarness) -> None:
+    c = await api.signed_in("izmir_admin")
+    base = {
+        "device_id": str(KOMP2.id), "name": "veri yok", "kind": "no_data",
+        "metric": "temperature_c", "duration_s": 60, "severity": "warning",
+    }  # fmt: skip
+
+    async def refused(body: dict[str, Any], why: str) -> None:
+        r = await c.post("/alarm-rules", json={**base, **body})
+        assert r.status_code == 422, why
+        assert r.json()["error"]["code"] == "validation_error", why
+
+    await refused({"duration_s": 9}, "a limit a single lost message would trip")
+    await refused({"duration_s": 601}, "above the cap")
+    await refused({"threshold": 80, "clear_threshold": 75}, "a threshold on a silence rule")
+    await refused({"operator": "<"}, "'<' on a silence rule")
+    await refused({"window_s": 600}, "a window on a silence rule")
+    assert (await c.post("/alarm-rules", json={**base, "duration_s": 10})).status_code == 201
 
 
 async def test_a_rule_change_wakes_the_alarm_service(api: ApiHarness) -> None:

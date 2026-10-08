@@ -104,7 +104,8 @@ class AlarmRule(Base):
     clear_threshold: Mapped[float] = mapped_column(Float, nullable=False)
     severity: Mapped[str] = mapped_column(Text, nullable=False)
     # threshold: one measured value against a limit. reactive_ratio: reactive / active energy over
-    # a sliding window of window_s seconds (energy analyzers only).
+    # a sliding window of window_s seconds (energy analyzers only). no_data: the metric has not
+    # arrived for duration_s seconds (operator '>', both thresholds 0: they are not used).
     kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'threshold'"))
     window_s: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
@@ -122,11 +123,16 @@ class AlarmRule(Base):
             " OR (operator = '<' AND clear_threshold >= threshold)",
             name="ck_rules_clear",
         ),
-        CheckConstraint("kind IN ('threshold','reactive_ratio')", name="ck_rules_kind"),
+        CheckConstraint("kind IN ('threshold','reactive_ratio','no_data')", name="ck_rules_kind"),
         CheckConstraint(
             "(kind = 'reactive_ratio' AND window_s IS NOT NULL AND window_s BETWEEN 60 AND 3600)"
-            " OR (kind = 'threshold' AND window_s IS NULL)",
+            " OR (kind IN ('threshold', 'no_data') AND window_s IS NULL)",
             name="ck_rules_window",
+        ),
+        CheckConstraint(
+            "kind <> 'no_data' OR (operator = '>' AND threshold = 0 AND clear_threshold = 0"
+            " AND duration_s BETWEEN 10 AND 600)",
+            name="ck_rules_no_data",
         ),
         CheckConstraint(
             "kind <> 'reactive_ratio' OR (metric = 'reactive_power_kvar' AND operator = '>')",
