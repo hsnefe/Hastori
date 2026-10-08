@@ -11,7 +11,11 @@ import type { Site } from "@/lib/types";
 
 import { ThemeToggle } from "./ThemeToggle";
 
-const NAV = [{ href: "", label: "Panel" }];
+const NAV = [
+  { href: "", label: "Panel" },
+  { href: "/alarms", label: "Alarmlar" },
+  { href: "/rules", label: "Kurallar" },
+];
 
 /** Signed-in frame of every site page: header, site picker, connection state. */
 export function SiteShell({ siteId, children }: { siteId: string; children: ReactNode }) {

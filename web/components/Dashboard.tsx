@@ -9,6 +9,7 @@ import type { LiveDevice } from "@/lib/live";
 import { useSession } from "@/lib/session";
 import type { Metric } from "@/lib/types";
 
+import { ActiveAlarms } from "./ActiveAlarms";
 import { EnergyCard } from "./EnergyCard";
 import { LiveChart } from "./LiveChart";
 
@@ -90,6 +91,7 @@ export function Dashboard({ siteId }: { siteId: string }) {
 
       <div className="side">
         <EnergyCard siteId={siteId} />
+        <ActiveAlarms siteId={siteId} compact />
       </div>
     </div>
   );
