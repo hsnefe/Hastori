@@ -5,7 +5,8 @@ Usage: python scripts/gen_env.py [--public] [--force] [output-path]
 - No .env yet: writes one with random secrets.
 - .env exists: leaves every value alone (existing volumes were initialised with its passwords)
   and only appends keys that were added to .env.example since, so a new variable does not
-  silently fall back to a hard-coded default in the code.
+  silently fall back to a hard-coded default in the code. The one exception is `--public`: it
+  replaces the SEED_* demo-user passwords (then run `make seed-reset`).
 - Refuses to create a fresh .env while the data volumes of an earlier stack still exist: the new
   random database/RabbitMQ passwords would not match them and nothing could log in. Restore the
   old .env, or `docker compose down -v` to start from scratch, or pass --force.
@@ -16,6 +17,7 @@ Usage: python scripts/gen_env.py [--public] [--force] [output-path]
 Needs only the standard library, so it runs before `uv sync`.
 """
 
+import contextlib
 import re
 import secrets
 import subprocess
@@ -77,6 +79,24 @@ def build_new(template: str, public: bool) -> tuple[str, dict[str, str]]:
     return text, values
 
 
+def private(path: Path) -> None:
+    """Owner-only where the platform has modes (a no-op on Windows)."""
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
+
+
+def rotate_seed_passwords(env_text: str) -> tuple[str, dict[str, str]]:
+    """New random SEED_* passwords inside an existing .env (`--public` on a stack that is
+    already set up). The database still holds the old hashes until `make seed-reset`."""
+    values = {key: rand() for key in SEED_KEYS}
+    for key, value in values.items():
+        if re.search(rf"^{key}=", env_text, flags=re.M):
+            env_text = re.sub(rf"^{key}=.*$", f"{key}={value}", env_text, flags=re.M)
+        else:
+            env_text = f"{env_text.rstrip()}\n{key}={value}\n"
+    return env_text, values
+
+
 def write_redis_secret(env_text: str) -> None:
     """infra/redis/redis.pw mirrors REDIS_PASSWORD (compose secret); rewritten on every run so
     the two cannot drift apart."""
@@ -85,6 +105,7 @@ def write_redis_secret(env_text: str) -> None:
         return
     REDIS_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     REDIS_SECRET_FILE.write_text(password, encoding="utf-8", newline="\n")
+    private(REDIS_SECRET_FILE)
 
 
 def main() -> None:
@@ -95,6 +116,14 @@ def main() -> None:
 
     if out.exists():
         current = out.read_text(encoding="utf-8")
+        if public:
+            current, values = rotate_seed_passwords(current)
+            out.write_text(current, encoding="utf-8", newline="\n")
+            private(out)
+            print(f"{out} exists: new random demo-user passwords (shown once, also in .env):")
+            for key in SEED_KEYS:
+                print(f"  {key}={values[key]}")
+            print("Run `make seed-reset` so the database takes them over.")
         have = parse(current)
         missing = {k: v for k, v in parse(template).items() if k not in have}
         if not missing:
@@ -113,6 +142,7 @@ def main() -> None:
         sep = "" if current.endswith("\n") else "\n"
         updated = f"{current}{sep}# added from .env.example\n{''.join(lines)}"
         out.write_text(updated, encoding="utf-8", newline="\n")
+        private(out)
         write_redis_secret(updated)
         print(f"{out} exists; added missing keys: {', '.join(missing)}")
         return
@@ -127,6 +157,7 @@ def main() -> None:
         )
     text, values = build_new(template, public)
     out.write_text(text, encoding="utf-8", newline="\n")
+    private(out)
     write_redis_secret(text)
     print(f"wrote {out} with generated secrets")
     if public:

@@ -20,6 +20,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   mosquitto:
     image: eclipse-mosquitto:2.1.2-alpine
@@ -48,6 +49,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:4.3.6-management
@@ -64,6 +66,7 @@ services:
       interval: 10s
       timeout: 10s
       retries: 20
+    restart: unless-stopped
 
   redis:
     image: redis:7.4.11-alpine
@@ -205,8 +208,9 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       JWT_SECRET: ${JWT_SECRET}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      # Origins a browser may open the WebSocket from (the packaged app is on 8080).
-      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
+      # Origins a browser may open the WebSocket from: the packaged app (8080) and
+      # `make web-dev` (3000).
+      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080,http://127.0.0.1:3000,http://localhost:3000}
       API_HTTP_PORT: "8000"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     security_opt: ["no-new-privileges:true"]

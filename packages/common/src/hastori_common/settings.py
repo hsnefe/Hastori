@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     alarm_http_port: int = 8003
     api_http_port: int = 8000
     # Stable id: the MQTT session (and the messages queued for it) belongs to this id.
-    ingest_client_id: str = "ingestion-1"
+    ingest_client_id: str = "ingestion"
     ingest_shutdown_deadline_s: float = 20.0
     alarm_shutdown_deadline_s: float = 20.0
     log_level: str = "INFO"

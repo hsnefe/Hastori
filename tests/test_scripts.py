@@ -48,3 +48,32 @@ def test_compose_services_do_not_publish_ports_beyond_loopback() -> None:
     ports = re.findall(r'^\s+- "([^"]+:\d+:\d+)"', compose, flags=re.M)
     assert ports, "no port mappings found"
     assert all(p.startswith("127.0.0.1:") for p in ports), ports
+
+
+def test_public_mode_replaces_the_seed_passwords_of_an_existing_env() -> None:
+    gen_env = load("gen_env")
+    current = "POSTGRES_PASSWORD=keep\nSEED_VIEWER_PASSWORD=viewer_demo_pw\n"
+    text, values = gen_env.rotate_seed_passwords(current)
+    env = gen_env.parse(text)
+    assert env["POSTGRES_PASSWORD"] == "keep"  # existing volumes depend on it
+    for key in gen_env.SEED_KEYS:
+        assert env[key] == values[key]
+        assert not env[key].endswith("_demo_pw")
+
+
+def test_compose_allows_the_dev_server_origin_for_websockets() -> None:
+    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    default = re.search(r"WS_ALLOWED_ORIGINS:-([^}]*)\}", text)
+    assert default is not None
+    assert "http://127.0.0.1:3000" in default.group(1)  # `make web-dev`
+    assert "http://127.0.0.1:8080" in default.group(1)  # the packaged app
+
+
+def test_every_long_running_service_restarts_on_its_own() -> None:
+    import yaml
+
+    services = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    one_shot = {"migrate"}
+    for name, svc in services.items():
+        if name not in one_shot:
+            assert svc.get("restart") == "unless-stopped", name
