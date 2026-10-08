@@ -3,9 +3,10 @@ current arguments.
 
 RabbitMQ refuses to declare an existing queue with different arguments (PRECONDITION_FAILED), and
 ingestion reports "rabbitmq unavailable" until that is resolved. Run this once after upgrading
-from a checkout that declared the queue differently, then restart ingestion:
+from a checkout that declared the queue differently, then restart ingestion and the alarm
+service (the alarm consumer is cancelled when the queue is deleted):
 
-    make reset-alarm-queue && docker compose restart ingestion
+    make reset-alarm-queue && docker compose restart ingestion alarm
 
 Messages waiting in the queue are lost; the raw measurements are in the database, and the alarm
 service replays the last minutes from there when it starts.
@@ -47,7 +48,7 @@ def main() -> None:
             print(delete_queue(name, auth))
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             sys.exit(f"cannot reach the RabbitMQ management API at {MANAGEMENT_URL}: {exc}")
-    print("restart ingestion so it declares the queue again: docker compose restart ingestion")
+    print("restart both so they declare the queue again: docker compose restart ingestion alarm")
 
 
 if __name__ == "__main__":
