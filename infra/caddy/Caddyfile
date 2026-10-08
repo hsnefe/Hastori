@@ -1,0 +1,45 @@
+# The single entry to the packaged app, http://127.0.0.1:8080:
+#   /api/*  (REST and the WebSocket at /api/v1/ws)  ->  the API
+#   everything else                                 ->  the Next.js server
+# One origin: the browser's refresh cookie (SameSite=Strict, Path=/api/v1/auth) is first-party and
+# the WebSocket needs no CORS. TLS, rate limits, the real client address and COOKIE_SECURE come in
+# the same file on day 4, when this listens on a public address.
+
+{
+	admin off
+	auto_https off
+	# Wait for open connections (WebSockets) this long on a reload or stop; the clients reconnect.
+	grace_period 10s
+}
+
+:8080 {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	# The access log may carry neither the WebSocket ticket (it is in the query string) nor
+	# credentials. Caddy already replaces Authorization and Cookie headers; the ticket is ours.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			request>uri query {
+				delete ticket
+			}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}
