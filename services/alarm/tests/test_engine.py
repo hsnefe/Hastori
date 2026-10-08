@@ -182,6 +182,97 @@ def test_a_device_clock_behind_by_minutes_gives_the_same_result() -> None:
     assert [(t.kind, t.ts + 300) for t in skewed] == [(t.kind, t.ts) for t in straight]
 
 
+def test_a_clock_set_back_by_an_hour_does_not_blind_the_alarm() -> None:
+    """B3: after the jump every sample is older than the newest one; the sequence restarts."""
+    e = engine_with()
+    assert run(e, temps([70.0] * 30)) == []
+    after_jump = temps([85.0] * 25, start=T0 - 3600)  # the device clock went back one hour
+    out = run(e, after_jump)
+    assert kinds(out) == ["opened"] and e.clock_jumps == 1
+
+
+def test_a_jump_restarts_a_half_counted_duration() -> None:
+    e = engine_with()
+    run(e, temps([85.0] * 10))  # 18 s pending
+    out = run(e, temps([85.0] * 10, start=T0 - 600))  # 18 s again after the jump: not 36 s
+    assert out == [] and e.phase_of(rule().id) is Phase.PENDING
+
+
+def test_an_open_alarm_stays_open_across_a_jump_and_closes_on_the_new_timeline() -> None:
+    e = engine_with()
+    run(e, temps([85.0] * 25))
+    assert e.phase_of(rule().id) is Phase.ACTIVE
+    out = run(e, temps([70.0] * 8, start=T0 - 7200))
+    assert kinds(out) == ["cleared"] and out[0].peak == 85.0
+
+
+def test_an_adopted_alarm_is_not_ignored_after_a_jump_before_its_opening_time() -> None:
+    e = engine_with()
+    e.adopt_open(rule().id, T0 + 100, peak=88.0)  # floor_ts = T0 + 100
+    run(e, temps([85.0] * 5, start=T0 + 200))
+    out = run(e, temps([70.0] * 8, start=T0 - 3600))  # the new timeline is before floor_ts
+    assert kinds(out) == ["cleared"]
+
+
+def test_a_small_slip_is_still_dropped() -> None:
+    e = engine_with()
+    samples = temps([85.0] * 25)
+    late = Sample(DEVICE, samples[-1].ts - 59.0, {"temperature_c": 70.0})
+    assert run(e, [*samples, late]) == run(engine_with(), samples) and e.clock_jumps == 0
+
+
+def test_exactly_sixty_seconds_behind_is_a_jump() -> None:
+    e = engine_with()
+    samples = temps([70.0] * 5)
+    run(e, samples)
+    run(e, [Sample(DEVICE, samples[-1].ts - 60.0, {"temperature_c": 70.0})])
+    assert e.clock_jumps == 1
+
+
+def test_a_redelivered_old_message_is_a_duplicate_not_a_jump() -> None:
+    e = engine_with()
+    samples = temps([70.0] * 100)
+    run(e, samples)
+    run(e, samples[:5])  # a redelivery of readings seen 3 minutes ago
+    assert e.clock_jumps == 0
+
+
+def test_a_backlog_older_than_the_replay_is_not_a_jump() -> None:
+    """After a long alarm-service outage the queue holds messages the replay did not cover."""
+    e = engine_with()
+    run(e, temps([70.0] * 100, start=T0 + 1000))
+    e.history_floor(T0 + 1000)
+    run(e, temps([85.0] * 40, start=T0))  # queued before the replay window began
+    assert e.clock_jumps == 0 and e.phase_of(rule().id) is Phase.NORMAL
+    e.mark_live(DEVICE)  # a live reading arrived: now an old timestamp is a clock set back
+    run(e, temps([85.0] * 40, start=T0 - 3600))
+    assert e.clock_jumps == 1
+
+
+def test_the_jump_restarts_a_reactive_window() -> None:
+    e = engine_with(
+        rule(
+            id=uuid.UUID(int=101),
+            kind="reactive_ratio",
+            metric="reactive_power_kvar",
+            threshold=0.18,
+            clear_threshold=0.165,
+            duration_s=0,
+            window_s=600,
+        )
+    )
+    run(
+        e,
+        [
+            Sample(DEVICE, T0 + i * 2, {"active_power_kw": 10.0, "reactive_power_kvar": 1.0})
+            for i in range(40)
+        ],
+    )
+    assert e.clock_jumps == 0
+    run(e, [Sample(DEVICE, T0 - 3600, {"active_power_kw": 10.0, "reactive_power_kvar": 1.0})])
+    assert e.clock_jumps == 1
+
+
 # -- restart ----------------------------------------------------------------------------------
 
 

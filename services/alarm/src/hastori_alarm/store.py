@@ -32,8 +32,9 @@ SELECT rule_id, max(coalesce(cleared_at, opened_at)) AS last_event FROM alarms G
 """
 # `ON CONFLICT ... WHERE` infers the partial unique index: one open alarm per rule.
 OPEN_SQL = """
-INSERT INTO alarms (id, rule_id, device_id, state, opened_at, peak_value)
-VALUES ($1, $2, $3, 'active', $4, $5)
+INSERT INTO alarms (id, rule_id, device_id, state, opened_at, peak_value, threshold,
+                    clear_threshold)
+VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
 ON CONFLICT (rule_id) WHERE state IN ('active', 'acknowledged') DO NOTHING
 RETURNING id
 """
@@ -118,7 +119,14 @@ class Store:
     async def open_alarm(self, rule: Rule, ts: float, peak: float) -> uuid.UUID | None:
         """The new alarm's id, or None if an alarm for this rule is already open."""
         alarm_id: uuid.UUID | None = await self.pool.fetchval(
-            OPEN_SQL, uuid.uuid4(), rule.id, rule.device_id, _dt(ts), peak
+            OPEN_SQL,
+            uuid.uuid4(),
+            rule.id,
+            rule.device_id,
+            _dt(ts),
+            peak,
+            rule.threshold,
+            rule.clear_threshold,
         )
         return alarm_id
 

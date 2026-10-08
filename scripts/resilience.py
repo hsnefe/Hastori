@@ -1,25 +1,38 @@
-"""Outage drills: proves no measurement is lost when a part of the stack goes away.
+"""Outage drills: proves no measurement is lost and no alarm is missed or doubled when a part of
+the stack goes away.
 
-Needs the full stack with the simulator running. Takes about 15 minutes (about 5 with --quick).
-Each drill stops or kills a service, lets the simulator keep publishing, brings the service back
-and then checks every one of the 28 series for gaps in the affected window.
+Needs the full stack with the simulator running. Takes about 30 minutes (about 20 with --quick).
+The ingestion drills stop or kill a service, let the simulator keep publishing, bring the service
+back and then check every one of the 28 series for gaps in the affected window.
 
-Drills: graceful restart, kill -9 (the real test of "ack only after commit"), an outage longer
-than the 5 minutes the old age limit allowed (6 minutes; skipped by --quick), broker restart,
-database outage, RabbitMQ outage, SIGTERM with the database down. Whatever happens, the services
-are started again at the end.
+Ingestion drills: graceful restart, kill -9 (the real test of "ack only after commit"), an outage
+longer than the 5 minutes the old age limit allowed (6 minutes; skipped by --quick), broker
+restart, database outage, RabbitMQ outage, SIGTERM with the database down.
+
+Alarm drills: an overheat fault is injected, the disruption hits while the rule is still counting
+its 30 s, and the drill then checks that exactly one alarm opened (not zero, not two), that it
+opened at the time the data says (the state is a function of stored data, not of memory), that it
+closed again and that the alarm queue drained. Disruptions: RabbitMQ restart, kill -9 of the alarm
+service, a database outage, and the process exiting by itself (SIGTERM to PID 1), which
+`restart: unless-stopped` has to bring back (`docker kill` counts as a manual stop and does not).
+
+Whatever happens, the services are started again at the end.
 
     make resilience            # everything
     make resilience ARGS=--quick
+    make resilience ARGS=--alarm-only   # just the alarm service drills (about 10 minutes)
 """
 
 import asyncio
+import base64
 import json
+import re
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import asyncpg
@@ -28,6 +41,11 @@ from hastori_common.seed_data import load_seed
 from hastori_common.settings import ROOT, Settings, get_settings
 
 SAMPLE_INTERVAL_S = 2.0
+ALARM_DEVICE = "izmir-komp-1"
+# The overheat crosses 80 C after 12-16 s, the demo rule wants 30 s above it: the alarm opens
+# 42-46 s after the fault starts. 75 s lets the fault end, so the alarm closes by itself.
+ALARM_FAULT_S = 75
+ALARM_OPENS_AFTER_S = (38.0, 62.0)
 # A drill that hangs (a service that never comes back, a docker call that never returns) must
 # fail the run, not freeze it: every docker call, every drill and the whole run have a deadline.
 COMMAND_TIMEOUT_S = 180
@@ -117,7 +135,7 @@ async def gaps(s: Settings, start: float, end: float) -> tuple[int, int]:
 
 
 def start_all() -> None:
-    for service in ("timescaledb", "rabbitmq", "mosquitto", "ingestion"):
+    for service in ("timescaledb", "rabbitmq", "mosquitto", "ingestion", "alarm"):
         try:
             subprocess.run(
                 ["docker", "compose", "--profile", "sim", "start", service],
@@ -290,11 +308,212 @@ async def drill_sigterm_with_db_down(s: Settings) -> None:
     )
 
 
+# -- alarm service drills ---------------------------------------------------------------------
+
+
+def alarm_ready(s: Settings) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{s.alarm_http_port}/readyz", timeout=3) as r:
+            return bool(r.status == 200)
+    except OSError:  # connection refused, timeout, 503 (HTTPError is an OSError)
+        return False
+
+
+async def wait_alarm_ready(s: Settings, max_wait_s: float = 120) -> bool:
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        if alarm_ready(s):
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
+def inject_fault(s: Settings, kind: str, duration_s: float) -> None:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{s.sim_control_port}/faults",
+        data=json.dumps({"device": ALARM_DEVICE, "kind": kind, "duration_s": duration_s}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {s.sim_control_token}",
+        },
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=5).read()
+
+
+def queue_depth(s: Settings) -> int | None:
+    m = re.match(r"amqp://([^:]+):([^@]+)@", s.rabbitmq_url)
+    user, password = (m.group(1), m.group(2)) if m else ("hastori", "hastori_demo")
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:15672/api/queues/%2F/alarm.telemetry",
+        headers={"Authorization": f"Basic {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return int(json.loads(r.read()).get("messages", 0))
+    except (OSError, ValueError):
+        return None
+
+
+async def fetch(s: Settings, sql: str, *args: object) -> list[asyncpg.Record]:
+    """One query on a fresh connection: a drill breaks the database on purpose, and a connection
+    held across the break is a dead one."""
+    conn = await connect(s)
+    try:
+        rows: list[asyncpg.Record] = await conn.fetch(sql, *args)
+        return rows
+    finally:
+        await conn.close()
+
+
+async def alarms_since(s: Settings, rule_id: object, since: float) -> list[asyncpg.Record]:
+    return await fetch(
+        s,
+        "SELECT state, opened_at, cleared_at FROM alarms WHERE rule_id = $1 AND opened_at >= $2 "
+        "ORDER BY opened_at",
+        rule_id,
+        datetime.fromtimestamp(since, UTC),
+    )
+
+
+async def wait_device_quiet(s: Settings, rule_id: object, max_wait_s: float = 150) -> bool:
+    """No open alarm for the rule and the device already below the clear threshold: an earlier
+    fault (an earlier drill, a manual `make fault`) must be over before the next one starts."""
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        (open_now,) = await fetch(
+            s, "SELECT count(*) AS n FROM alarms WHERE rule_id = $1 AND state <> 'cleared'", rule_id
+        )
+        latest = await fetch(
+            s,
+            "SELECT m.value FROM measurements m JOIN devices d ON d.id = m.device_id "
+            "WHERE d.key = $1 AND m.metric = 'temperature_c' ORDER BY m.time DESC LIMIT 1",
+            ALARM_DEVICE,
+        )
+        if open_now["n"] == 0 and latest and latest[0]["value"] < 75.0:
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
+async def alarm_drill(
+    s: Settings, label: str, disrupt: Callable[[], Awaitable[None]], *, wait_for: float = 14
+) -> None:
+    """Inject an overheat, disrupt `wait_for` seconds in (the rule is still counting), then expect
+    exactly one alarm, opened when the data says, closed again, and an empty queue."""
+    rows = await fetch(
+        s,
+        "SELECT r.id FROM alarm_rules r JOIN devices d ON d.id = r.device_id "
+        "WHERE d.key = $1 AND r.metric = 'temperature_c' AND r.enabled",
+        ALARM_DEVICE,
+    )
+    rule_id = rows[0]["id"]
+    if not await wait_device_quiet(s, rule_id):
+        record(label, False, "an earlier fault or alarm was still running before the drill")
+        return
+    t0 = time.time()
+    inject_fault(s, "overheat", ALARM_FAULT_S)
+    await asyncio.sleep(wait_for)
+    await disrupt()
+    await wait_alarm_ready(s)
+    found: list[asyncpg.Record] = []
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline and not found:
+        found = await alarms_since(s, rule_id, t0)
+        if not found:
+            await asyncio.sleep(2)
+    closed = False
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and found and not closed:
+        found = await alarms_since(s, rule_id, t0)
+        closed = bool(found) and all(a["state"] == "cleared" for a in found)
+        if not closed:
+            await asyncio.sleep(2)
+    await asyncio.sleep(5)  # a duplicate would have been written by now
+    found = await alarms_since(s, rule_id, t0)
+    depth = queue_depth(s)
+    delay = found[0]["opened_at"].timestamp() - t0 if found else None
+    on_time = delay is not None and ALARM_OPENS_AFTER_S[0] <= delay <= ALARM_OPENS_AFTER_S[1]
+    shown = "never" if delay is None else f"{delay:.0f} s"
+    record(
+        label,
+        len(found) == 1 and on_time and closed and depth is not None and depth < 100,
+        f"{len(found)} alarm(s), opened {shown} after the fault, closed={closed}, queue={depth}",
+    )
+
+
+async def drill_alarm_rabbitmq_restart(s: Settings) -> None:
+    async def disrupt() -> None:
+        compose("restart", "rabbitmq")
+
+    await alarm_drill(s, "alarm: rabbitmq restart while an excursion is pending", disrupt)
+
+
+async def drill_alarm_kill(s: Settings) -> None:
+    async def disrupt() -> None:
+        compose("kill", "-s", "SIGKILL", "alarm")  # a manual kill: unless-stopped does not apply
+        await asyncio.sleep(10)
+        compose("start", "alarm")
+
+    await alarm_drill(s, "alarm: kill -9 while an excursion is pending", disrupt)
+
+
+async def drill_alarm_db_outage(s: Settings) -> None:
+    async def disrupt() -> None:
+        compose("stop", "timescaledb")
+        await asyncio.sleep(20)
+        compose("start", "timescaledb")
+        await wait_ready(s, 120)
+
+    await alarm_drill(s, "alarm: database outage while an excursion is pending", disrupt)
+
+
+def restart_count() -> int:
+    container = subprocess.run(
+        ["docker", "compose", "ps", "-q", "alarm"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=COMMAND_TIMEOUT_S,
+    ).stdout.strip()
+    out = subprocess.run(
+        ["docker", "inspect", "-f", "{{.RestartCount}}", container],
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT_S,
+    )
+    return int(out.stdout.strip() or -1)
+
+
+async def drill_alarm_exits_by_itself(s: Settings) -> None:
+    """The process exits on its own (SIGTERM to PID 1, as a crash or an OOM would end it):
+    `restart: unless-stopped` brings it back with no `docker compose start`."""
+    before = restart_count()
+    restarted = False
+
+    async def disrupt() -> None:
+        nonlocal restarted
+        pid1_exit = "import os, signal; os.kill(1, signal.SIGTERM)"
+        compose("exec", "-T", "alarm", "python", "-c", pid1_exit)
+        await asyncio.sleep(5)
+        restarted = await wait_alarm_ready(s, 120) and restart_count() > before
+
+    await alarm_drill(s, "alarm: exits by itself, unless-stopped brings it back", disrupt)
+    record("alarm: docker's restart counter went up (the drill did not start it)", restarted)
+
+
 async def main() -> None:
     s = get_settings()
     quick = "--quick" in sys.argv
     if not await wait_ready(s, 10):
         sys.exit("stack is not ready: make up && make seed && make simulate")
+    alarm_drills = [
+        drill_alarm_rabbitmq_restart,
+        drill_alarm_kill,
+        drill_alarm_db_outage,
+        drill_alarm_exits_by_itself,
+    ]
     drills = [
         drill_ingestion_restart,
         drill_ingestion_kill,
@@ -303,7 +522,10 @@ async def main() -> None:
         drill_db_outage,
         drill_rabbitmq_outage,
         drill_sigterm_with_db_down,
+        *alarm_drills,
     ]
+    if "--alarm-only" in sys.argv:
+        drills = alarm_drills
     started = time.monotonic()
     try:
         for drill in drills:

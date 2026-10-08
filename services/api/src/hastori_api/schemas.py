@@ -232,6 +232,10 @@ class TimelineEntry(BaseModel):
 
 
 class AlarmDetailOut(AlarmOut):
+    threshold: float | None = Field(
+        default=None, description="the rule's threshold when the alarm opened (null before 0006)"
+    )
+    clear_threshold: float | None = None
     timeline: list[TimelineEntry]
     rule: RuleOut
 

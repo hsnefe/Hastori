@@ -47,6 +47,7 @@ log = logging.getLogger("alarm")
 # the whole window of the longest reactive rule.
 REPLAY_MIN_S = 900.0
 PREFETCH = 200
+LIVE_WITHIN_S = 60.0  # a reading this close to the wall clock is live, not queued
 RELOAD_INTERVAL_S = 60.0
 LISTEN_CHECK_S = 5.0
 BACKOFF_MAX_S = 30.0
@@ -252,10 +253,14 @@ class AlarmService:
         longest = max(max(r.window_s or 0, r.duration_s) for r in rules)
         lookback = max(REPLAY_MIN_S, longest + 60.0)
         devices = sorted({r.device_id for r in rules})
-        samples = await self._retry(lambda: self._store.samples(devices, time.time() - lookback))
+        since = time.time() - lookback
+        samples = await self._retry(lambda: self._store.samples(devices, since))
         for sample in samples:
             for t in self.engine.feed(sample):
                 await self.apply(t, suppress_up_to=watermarks.get(t.rule.id))
+        # What the replay covered (and everything older) is history: a queued message from before
+        # the restart is a backlog to drop, not a device clock that was set back.
+        self.engine.history_floor(since)
         log.info("replayed", extra={"samples": len(samples), "lookback_s": lookback})
 
     async def reload(self) -> None:
@@ -332,9 +337,16 @@ class AlarmService:
             await self._settle(message.reject(requeue=False))
             return
         sample = Sample(event.device_id, event.ts, event.metrics)
+        if abs(time.time() - event.ts) <= LIVE_WITHIN_S:
+            self.engine.mark_live(event.device_id)
         try:
             async with self.lock:
-                for t in self.engine.feed(sample):
+                jumps = self.engine.clock_jumps
+                transitions = self.engine.feed(sample)
+                if self.engine.clock_jumps > jumps:
+                    metrics.CLOCK_JUMPS.inc(self.engine.clock_jumps - jumps)
+                    log.warning("device clock set back", extra={"device_id": str(event.device_id)})
+                for t in transitions:
                     await self.apply(t)
         except Stopping:
             return  # un-acked: redelivered after the restart, and the replay rebuilds the state

@@ -155,6 +155,9 @@ class Alarm(Base):
     acked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     peak_value: Mapped[float | None] = mapped_column(Float)
+    # The rule's thresholds when the alarm opened (the rule may be edited later); NULL before 0006.
+    threshold: Mapped[float | None] = mapped_column(Float)
+    clear_threshold: Mapped[float | None] = mapped_column(Float)
     __table_args__ = (
         CheckConstraint("state IN ('active','acknowledged','cleared')", name="ck_alarms_state"),
         Index(

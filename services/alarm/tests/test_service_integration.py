@@ -505,3 +505,37 @@ async def test_a_long_rule_is_rebuilt_after_a_restart_in_the_middle_of_its_count
     (alarm,) = await alarms(seeded)
     assert alarm["state"] == "active"
     assert start + 1800 <= alarm["opened_at"].timestamp() <= time.time()
+
+
+async def test_an_alarm_keeps_the_thresholds_it_opened_with(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    start = time.time() - 200
+    await insert_series(seeded, start, [85.0] * 40)
+    await (await new_service(seeded, fake_redis)).startup()
+    await seeded.execute(
+        "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85"
+    )  # edited later
+    (alarm,) = await alarms(seeded)
+    assert alarm["threshold"] == RULE.threshold and alarm["clear_threshold"] == RULE.clear_threshold
+
+
+async def test_a_device_clock_set_back_does_not_blind_the_live_alarm(
+    seeded: asyncpg.Pool, fake_redis: Redis
+) -> None:
+    """B3 through the real message path: 60 hot readings, 1 h behind the newest, still alarm."""
+    svc = await new_service(seeded, fake_redis)
+    await svc.startup()
+    now = time.time()
+    for i in range(10):
+        msg = telemetry(now + i * STEP, 70.0)
+        await svc.handle(msg)  # type: ignore[arg-type]
+    behind = now - 3600
+    for i in range(40):
+        msg = telemetry(behind + i * STEP, 85.0)
+        await svc.handle(msg)  # type: ignore[arg-type]
+        assert msg.acked
+    (alarm,) = await alarms(seeded)
+    assert alarm["state"] == "active"
+    assert alarm["opened_at"].timestamp() == pytest.approx(behind + 30, abs=0.01)
+    assert svc.engine.clock_jumps == 1

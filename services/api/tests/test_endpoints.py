@@ -412,6 +412,22 @@ async def test_an_alarm_comes_with_its_timeline_and_rule(api: ApiHarness) -> Non
     assert body["timeline"][1]["by"] == DEMO_USERS["izmir_admin"][0]
     assert body["rule"]["threshold"] == 80 and body["rule"]["clear_threshold"] == 75
     assert body["acked_by"] is not None and body["cleared_at"] is not None
+    assert body["threshold"] is None and body["clear_threshold"] is None  # opened before 0006
+
+
+async def test_an_alarm_detail_shows_the_thresholds_it_opened_with(api: ApiHarness) -> None:
+    alarm = await make_alarm(api, "active", 5)
+    await sql(
+        api,
+        "UPDATE alarms SET threshold = 80, clear_threshold = 75 WHERE id = $1",
+        uuid.UUID(alarm),
+    )
+    await sql(api, "UPDATE alarm_rules SET threshold = 90, clear_threshold = 85")  # edited since
+    c = await api.signed_in("izmir_viewer")
+    body = (await c.get(f"/alarms/{alarm}")).json()
+    assert (body["threshold"], body["clear_threshold"]) == (80, 75)
+    assert (body["rule"]["threshold"], body["rule"]["clear_threshold"]) == (90, 85)
+    assert "threshold" not in (await c.get("/alarms")).json()["items"][0]
 
 
 async def test_acknowledging_records_who_and_when_and_announces_it(api: ApiHarness) -> None:

@@ -97,6 +97,8 @@ async def alarm_detail(
         timeline.append(TimelineEntry(event="cleared", at=alarm.cleared_at))
     return AlarmDetailOut(
         **_out(alarm, rule, device, site).model_dump(),
+        threshold=alarm.threshold,
+        clear_threshold=alarm.clear_threshold,
         timeline=timeline,
         rule=rule_out(rule, device),
     )

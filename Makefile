@@ -50,8 +50,9 @@ smoke:
 smoke-quick:
 	uv run python scripts/smoke.py --no-fault
 
-# Outage drills (about 15 minutes): restart / kill ingestion, a 6 minute ingestion outage, stop the
-# broker / database / RabbitMQ, SIGTERM under failure. `--quick` skips the long one.
+# Outage drills (about 30 minutes): restart / kill ingestion, a 6 minute ingestion outage, stop the
+# broker / database / RabbitMQ, SIGTERM under failure, then the alarm service (RabbitMQ restart,
+# kill -9, database outage, exiting by itself). `--quick` skips the long one.
 resilience:
 	uv run python scripts/resilience.py $(ARGS)
 

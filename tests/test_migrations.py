@@ -1,4 +1,4 @@
-"""Migrations 0003-0005 against a real PostgreSQL (0002 is replaced by a plain stand-in, see
+"""Migrations 0003-0006 against a real PostgreSQL (0002 is replaced by a plain stand-in, see
 conftest.py). The point: the SQL is valid, the constraints do what the comments say, downgrades
 work, and the models match the database (`alembic check`)."""
 
@@ -199,7 +199,7 @@ def test_downgrade_and_upgrade_again(pg_uri: str, template_db: str) -> None:
     cfg = alembic_config(with_database(pg_uri, name))
     command.downgrade(cfg, "0003")
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "0002")  # 0003-0005 all the way down (0002 itself needs TimescaleDB)
+    command.downgrade(cfg, "0002")  # 0003-0006 all the way down (0002 itself needs TimescaleDB)
     command.upgrade(cfg, "head")
 
 
@@ -242,3 +242,32 @@ def test_downgrading_switches_reactive_ratio_rules_off(pg_uri: str, template_db:
             await conn.close()
 
     assert asyncio.run(enabled()) is False
+
+
+def test_0006_adds_the_thresholds_and_downgrades_cleanly(pg_uri: str, template_db: str) -> None:
+    name = f"t_{uuid.uuid4().hex[:12]}"
+
+    async def prepare() -> None:
+        conn = await asyncpg.connect(with_database(pg_uri, "postgres"))
+        await conn.execute(f'CREATE DATABASE "{name}" TEMPLATE "{template_db}"')
+        await conn.close()
+
+    asyncio.run(prepare())
+    dsn = with_database(pg_uri, name)
+    cfg = alembic_config(dsn)
+
+    async def columns() -> set[str]:
+        conn = await asyncpg.connect(dsn)
+        try:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'alarms'"
+            )
+            return {r["column_name"] for r in rows}
+        finally:
+            await conn.close()
+
+    assert {"threshold", "clear_threshold"} <= asyncio.run(columns())
+    command.downgrade(cfg, "0005")
+    assert not {"threshold", "clear_threshold"} & asyncio.run(columns())
+    command.upgrade(cfg, "head")
+    assert {"threshold", "clear_threshold"} <= asyncio.run(columns())

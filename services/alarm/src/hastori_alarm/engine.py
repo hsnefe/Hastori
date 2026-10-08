@@ -13,6 +13,11 @@ Per rule (shown for operator '>'; '<' is the mirror image):
 Time is always the timestamp of the sample: a device clock that runs behind shifts every sample by
 the same amount and changes nothing; a backlog replayed at full speed behaves like the live
 stream. Acknowledging an alarm is not a state here: an acknowledged alarm is still active.
+
+A device clock that is set back while the device keeps running is the exception: every new sample
+would look older than the newest one and be dropped as a duplicate, so the alarm would be blind
+until the clock caught up again. A sample CLOCK_JUMP_S or more behind the newest one that is not a
+known duplicate therefore restarts that device's sequence (`clock_jumps` counts them).
 """
 
 import math
@@ -26,6 +31,12 @@ from hastori_alarm.reactive import MAX_GAP_S, ReactiveWindow
 
 # How long the value must stay below the clear threshold before the alarm closes (demo assumption).
 CLEAR_HOLD_S = 10.0
+
+# A sample this far (or further) behind the device's newest one, and not a duplicate of something
+# already seen, means the device clock was set back; smaller slips are dropped as out of order.
+CLOCK_JUMP_S = 60.0
+# How far back the engine remembers the timestamps it has accepted (to recognise redeliveries).
+SEEN_WINDOW_S = 900.0
 
 ACTIVE_METRIC = "active_power_kw"
 REACTIVE_METRIC = "reactive_power_kvar"
@@ -171,6 +182,16 @@ class RuleState:
                 self._to_normal()
         return out
 
+    def restart_sequence(self) -> None:
+        """The device clock jumped back: forget the continuity of the old timeline. A half-counted
+        duration or clear hold starts again, an open alarm stays open (its peak is kept)."""
+        if self.phase is Phase.PENDING:
+            self._to_normal()
+        elif self.phase is Phase.CLEARING:
+            self.phase, self.clear_since = Phase.ACTIVE, None
+        self.last_ts, self.floor_ts = None, -math.inf
+        self.window = self._new_window()
+
     def _to_normal(self) -> None:
         self.phase, self.pending_since, self.clear_since, self.peak = Phase.NORMAL, None, None, None
 
@@ -186,6 +207,10 @@ class Engine:
         self._states: dict[UUID, RuleState] = {}
         self._by_device: dict[UUID, list[UUID]] = {}
         self._newest: dict[UUID, float] = {}  # device -> newest sample ts seen
+        self._seen: dict[UUID, set[float]] = {}  # device -> accepted timestamps (recent)
+        self._floor = -math.inf  # samples before this were covered by the start-up replay
+        self._live: set[UUID] = set()  # devices whose backlog is over (see mark_live)
+        self.clock_jumps = 0
 
     # -- rules -------------------------------------------------------------------------------
     def set_rules(self, rules: Iterable[Rule], now: float) -> list[Transition]:
@@ -227,18 +252,47 @@ class Engine:
             st.pending_since = st.clear_since = None
 
     # -- samples -----------------------------------------------------------------------------
+    def history_floor(self, since: float) -> None:
+        """Samples older than `since` were already covered by the start-up replay (or are older
+        than it looked): until the device is live again, an old message that arrives is a backlog
+        queued during the outage, never a clock jump."""
+        self._floor = since
+
+    def mark_live(self, device_id: UUID) -> None:
+        """A reading of this device arrived in real time: the backlog is behind us, so from now
+        on an old timestamp is a clock that was set back and no longer a message that queued."""
+        self._live.add(device_id)
+
     def feed(self, sample: Sample) -> list[Transition]:
         # Millisecond resolution: the same reading must compare equal whether it came from a
         # message or from the database.
         sample = Sample(sample.device_id, round(sample.ts, 3), sample.metrics)
-        newest = self._newest.get(sample.device_id)
-        if newest is not None and sample.ts <= newest:
-            return []  # a duplicate or an out-of-order message: already counted
-        self._newest[sample.device_id] = sample.ts
+        device, ts = sample.device_id, sample.ts
+        newest = self._newest.get(device)
+        seen = self._seen.setdefault(device, set())
+        if newest is not None and ts <= newest:
+            if (
+                ts in seen
+                or newest - ts < CLOCK_JUMP_S
+                or (ts < self._floor and device not in self._live)
+            ):
+                return []  # a duplicate, a backlog or a small slip: already counted or too late
+            self._restart_sequence(device)
+            seen = self._seen[device]
+        self._newest[device] = ts
+        seen.add(ts)
+        if len(seen) > 2 * SEEN_WINDOW_S:  # pruned lazily; ~450 entries are live at a 2 s interval
+            seen.difference_update([t for t in seen if t < ts - SEEN_WINDOW_S])
         out: list[Transition] = []
-        for rid in self._by_device.get(sample.device_id, ()):
+        for rid in self._by_device.get(device, ()):
             out.extend(self._states[rid].feed(sample))
         return out
+
+    def _restart_sequence(self, device: UUID) -> None:
+        self.clock_jumps += 1
+        self._seen[device] = set()
+        for rid in self._by_device.get(device, ()):
+            self._states[rid].restart_sequence()
 
     # -- inspection --------------------------------------------------------------------------
     def phase_of(self, rule_id: UUID) -> Phase | None:

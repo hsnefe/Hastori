@@ -18,3 +18,8 @@ EVENT_PUBLISH_FAILURES = Counter(
     "alarm_event_publish_failures", "Redis publish failures for alarm events", registry=REGISTRY
 )
 RECONNECTS = Counter("alarm_rabbitmq_connects", "RabbitMQ consumer (re)starts", registry=REGISTRY)
+CLOCK_JUMPS = Counter(
+    "alarm_clock_jumps",
+    "Device clocks that were set back by a minute or more (the device's sequence was restarted)",
+    registry=REGISTRY,
+)
