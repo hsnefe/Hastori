@@ -1,4 +1,4 @@
-.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint web-install web-dev web-check
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
@@ -72,3 +72,15 @@ lint:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run mypy packages services scripts tests conftest.py
+
+# The dashboard with hot reload on http://127.0.0.1:3000; /api goes to the API on 8000 (Next rewrite)
+# and the WebSocket straight to it (web/.env.development). The packaged one is on :8080.
+web-install:
+	cd web && npm ci
+
+web-dev:
+	cd web && npm run dev
+
+# Lint, types and unit tests of the dashboard
+web-check:
+	cd web && npm run lint && npm run typecheck && npm test

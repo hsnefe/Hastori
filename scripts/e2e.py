@@ -15,11 +15,16 @@ pieces; this proves they are wired together):
 - disabling the rule closes its open alarm within seconds (the rule change reaches the service)
 - a malformed message lands in the dead-letter queue and the service stays up
 - a compensation failure on the main panel raises the reactive-ratio warning
+- the WebSocket (day 3): single-use 30 s tickets (also through Caddy), the origin check, the
+  subscription matrix, each site's stream carrying its own devices only, the alarm lifecycle as
+  the screen sees it, the stream surviving a stopped alarm service, a Redis restart (resync) and
+  an API restart (reconnect within 30 s)
 
 Writes: it injects faults into izmir-komp-1 and izmir-pano, acknowledges and disables/re-enables
 the İzmir temperature rule. It restores what it changed (also when a check fails). Run it only
 against a demo stack. `--skip-reactive` leaves out the slowest check (about 4 minutes);
-`--skip-restart` leaves out the restart of the alarm service.
+`--skip-restart` leaves out the restarts of the alarm service, Redis and the API;
+`--only=sign-in,spike` runs just the named steps (see `steps` in `main`).
 """
 
 import asyncio
@@ -34,7 +39,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import websockets
 from redis.asyncio import Redis
+from websockets.typing import Origin
 
 from hastori_common.events import channel
 from hastori_common.seed_data import load_seed
@@ -192,8 +199,12 @@ class Stack:
 
         async def listen() -> None:
             async for message in pubsub.listen():
-                if message["type"] == "message":
-                    self.events.append(json.loads(message["data"]))
+                if message["type"] != "message":
+                    continue
+                event = json.loads(message["data"])
+                # the channel also carries a measurement every 2 s per device (the live chart's)
+                if str(event.get("type", "")).startswith("alarm."):
+                    self.events.append(event)
 
         self._listener = asyncio.create_task(listen())
         await asyncio.sleep(0.5)
@@ -600,6 +611,288 @@ async def check_site_views(stack: Stack) -> None:
     )
 
 
+# -- WebSocket (day 3) ----------------------------------------------------------------------
+
+API_WS = "ws://127.0.0.1:8000/api/v1/ws"
+CADDY_WS = "ws://127.0.0.1:8080/api/v1/ws"  # the packaged entry: REST and WebSocket, one origin
+ORIGIN = "http://127.0.0.1:8080"
+ANTALYA = SEED.site_by_key("antalya")
+IZMIR_DEVICES = {d.id for d in SEED.devices if d.site == "izmir"}
+ANTALYA_DEVICES = {d.id for d in SEED.devices if d.site == "antalya"}
+
+
+async def ws_ticket(stack: Stack, actor: str) -> str:
+    r = await stack.clients[actor].post("/ws-ticket")
+    r.raise_for_status()
+    return str(r.json()["ticket"])
+
+
+async def ws_open(url: str, ticket: str, origin: str | None = ORIGIN) -> Any:
+    return await websockets.connect(
+        f"{url}?ticket={ticket}",
+        origin=None if origin is None else Origin(origin),
+        open_timeout=10,
+    )
+
+
+async def ws_next(ws: Any, seconds: float = 5.0) -> dict[str, Any] | None:
+    """The next message, or None when the socket closed (ws.close_code is then set) or nothing
+    arrived within `seconds`."""
+    try:
+        message: dict[str, Any] = json.loads(await asyncio.wait_for(ws.recv(), seconds))
+        return message
+    except (websockets.ConnectionClosed, TimeoutError):
+        return None
+
+
+async def ws_collect(ws: Any, seconds: float) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    deadline = time.monotonic() + seconds
+    while (left := deadline - time.monotonic()) > 0:
+        message = await ws_next(ws, left)
+        if message is None:
+            if ws.close_code is not None:
+                break
+            continue
+        out.append(message)
+    return out
+
+
+async def ws_closed_with(ws: Any, seconds: float = 5.0) -> int | None:
+    """The close code the server sent (messages before it are skipped)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        await ws_next(ws, max(0.1, deadline - time.monotonic()))
+        if ws.close_code is not None:
+            return int(ws.close_code)
+    return None
+
+
+async def ws_subscribe(ws: Any, site_id: Any) -> dict[str, Any] | None:
+    await ws.send(json.dumps({"type": "subscribe", "site_id": str(site_id)}))
+    return await ws_next(ws)
+
+
+async def check_ws_tickets(stack: Stack) -> None:
+    ticket = await ws_ticket(stack, "izmir_viewer")
+    first = await ws_open(CADDY_WS, ticket)  # through Caddy: the packaged entry
+    hello = await ws_next(first)
+    record(
+        "websocket through Caddy: a ticket opens it and the server greets with the user's sites",
+        bool(hello)
+        and hello is not None
+        and hello["type"] == "hello"
+        and hello["sites"] == [str(IZMIR.id)],
+        str(hello),
+    )
+    second = await ws_open(API_WS, ticket)
+    record(
+        "a ticket works once: the second use is closed with 4401",
+        await ws_closed_with(second) == 4401,
+        f"close code {second.close_code}",
+    )
+    await first.close()
+
+    token = stack.clients["izmir_viewer"].headers["Authorization"].split()[-1]
+    as_ticket = await ws_open(API_WS, token)
+    record(
+        "the access token is not accepted in place of a ticket",
+        await ws_closed_with(as_ticket) == 4401,
+        f"close code {as_ticket.close_code}",
+    )
+
+    stale = await ws_ticket(stack, "izmir_viewer")
+    await asyncio.sleep(31)
+    late = await ws_open(API_WS, stale)
+    record(
+        "a ticket is worth nothing after 30 s",
+        await ws_closed_with(late) == 4401,
+        f"close code {late.close_code}",
+    )
+
+    try:
+        await ws_open(API_WS, await ws_ticket(stack, "izmir_viewer"), origin="https://evil.example")
+        refused = False
+        detail = "connected"
+    except websockets.InvalidStatus as exc:
+        refused, detail = exc.response.status_code == 403, f"HTTP {exc.response.status_code}"
+    record("a browser origin that is not listed is refused with 403", refused, detail)
+
+
+async def check_ws_scope(stack: Stack) -> None:
+    cases = [
+        ("izmir_viewer", ANTALYA.id, False),
+        ("antalya_viewer", IZMIR.id, False),
+        ("izmir_admin", ANTALYA.id, False),
+        ("izmir_viewer", IZMIR.id, True),
+        ("antalya_admin", ANTALYA.id, True),
+        ("admin", IZMIR.id, True),
+        ("admin", ANTALYA.id, True),
+    ]
+    wrong: list[str] = []
+    for actor, site, allowed in cases:
+        ws = await ws_open(API_WS, await ws_ticket(stack, actor))
+        await ws_next(ws)  # hello
+        reply = await ws_subscribe(ws, site)
+        if allowed:
+            if reply != {"type": "resync"}:
+                wrong.append(f"{actor} -> {site}: {reply}")
+        elif await ws_closed_with(ws) != 4403:
+            wrong.append(f"{actor} -> {site}: not closed with 4403")
+        await ws.close()
+    record(
+        "websocket subscription matrix (5 users x 2 sites): 4403 outside the scope",
+        not wrong,
+        "; ".join(wrong),
+    )
+
+    # what each site's screen actually receives
+    seen: dict[str, set[str]] = {}
+    ages: list[float] = []
+    for actor, site in (("izmir_viewer", IZMIR.id), ("antalya_viewer", ANTALYA.id)):
+        ws = await ws_open(API_WS, await ws_ticket(stack, actor))
+        await ws_next(ws)
+        await ws_subscribe(ws, site)
+        messages = await ws_collect(ws, 8)
+        measurements = [m for m in messages if m["type"] == "measurement"]
+        seen[actor] = {m["device_id"] for m in measurements}
+        ages += [time.time() - m["ts"] for m in measurements]
+        await ws.close()
+    record(
+        "each site's live stream carries its own devices only (İzmir 4, Antalya 3), nobody else's",
+        seen["izmir_viewer"] == {str(i) for i in IZMIR_DEVICES}
+        and seen["antalya_viewer"] == {str(i) for i in ANTALYA_DEVICES},
+        f"izmir={len(seen['izmir_viewer'])} antalya={len(seen['antalya_viewer'])}",
+    )
+    record(
+        "live measurements are fresh (under 10 s old when they arrive)",
+        bool(ages) and max(ages) < 10,
+        f"{len(ages)} events, oldest {max(ages, default=0):.1f} s",
+    )
+
+
+async def check_ws_alarm_flow(stack: Stack) -> None:
+    """The demo scenario as the screen sees it: opened, acknowledged, cleared, all by socket."""
+    ws = await ws_open(API_WS, await ws_ticket(stack, "izmir_viewer"))
+    await ws_next(ws)
+    await ws_subscribe(ws, IZMIR.id)
+    started = time.time()
+    await stack.fault("izmir-komp-1", "overheat", 80)
+    opened: dict[str, Any] | None = None
+    deadline = time.monotonic() + 70
+    while opened is None and time.monotonic() < deadline:
+        m = await ws_next(ws, 5)
+        if m and m["type"] == "alarm.opened" and m["rule_id"] == str(TEMP_RULE.id):
+            opened = m
+    after = None if opened is None else opened["ts"] - started
+    record(
+        "websocket: alarm.opened arrives about 45 s after the fault, without a page refresh",
+        opened is not None and after is not None and 38 <= after <= 62,
+        f"{after if after is None else round(after)} s",
+    )
+    if opened is None:
+        await ws.close()
+        return
+    r = await stack.clients["izmir_admin"].post(f"/alarms/{opened['alarm_id']}/ack")
+    acked = None
+    cleared = None
+    deadline = time.monotonic() + 110
+    while cleared is None and time.monotonic() < deadline:
+        m = await ws_next(ws, 5)
+        if m and m.get("alarm_id") == opened["alarm_id"]:
+            if m["type"] == "alarm.acknowledged":
+                acked = m
+            elif m["type"] == "alarm.cleared":
+                cleared = m
+    record(
+        "websocket: the acknowledgement and then the clearing reach the screen",
+        r.status_code == 200 and acked is not None and cleared is not None,
+        f"ack http {r.status_code}, acknowledged={acked is not None}, "
+        f"cleared={cleared is not None}",
+    )
+    detail = (await stack.clients["izmir_viewer"].get(f"/alarms/{opened['alarm_id']}")).json()
+    record(
+        "the alarm detail shows the thresholds it opened with and its three moments",
+        detail["threshold"] == TEMP_RULE.threshold
+        and detail["clear_threshold"] == TEMP_RULE.clear_threshold
+        and [t["event"] for t in detail["timeline"]] == ["opened", "acknowledged", "cleared"],
+        f"{detail['threshold']}/{detail['clear_threshold']}",
+    )
+    await ws.close()
+
+
+async def alarm_service_up(seconds: float = 90) -> bool:
+    return bool(await wait_for(alarm_service_ready, seconds, every=2))
+
+
+async def check_ws_resilience(stack: Stack, skip_restart: bool) -> None:
+    if skip_restart:
+        return
+    # the alarm service is not in the live path: stopping it does not stop the chart
+    ws = await ws_open(API_WS, await ws_ticket(stack, "izmir_viewer"))
+    await ws_next(ws)
+    await ws_subscribe(ws, IZMIR.id)
+    compose("stop", "alarm")
+    try:
+        during = [m for m in await ws_collect(ws, 10) if m["type"] == "measurement"]
+    finally:
+        compose("start", "alarm")
+    record(
+        "live measurements keep flowing while the alarm service is stopped",
+        len(during) >= 20,
+        f"{len(during)} events in 10 s",
+    )
+    await alarm_service_up()
+
+    # Redis restarts: the hub reconnects and every client is told to fetch the state again
+    compose("restart", "redis")
+    resync = None
+    deadline = time.monotonic() + 40
+    while resync is None and time.monotonic() < deadline:
+        m = await ws_next(ws, 5)
+        if m and m["type"] == "resync":
+            resync = m
+    after = [m for m in await ws_collect(ws, 6) if m["type"] == "measurement"]
+    record(
+        "redis restart: the screen gets a resync and the stream resumes",
+        resync is not None and len(after) > 0,
+        f"resync={resync is not None}, {len(after)} events afterwards",
+    )
+    await ws.close()
+
+    # the API restarts: the socket drops, a new ticket and a new connection work within 30 s
+    async def api_ready() -> bool:
+        try:
+            return (
+                await httpx.AsyncClient().get("http://127.0.0.1:8000/readyz")
+            ).status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    await wait_for(api_ready, 60, every=1)  # Redis was just restarted: sessions need it back
+    ws = await ws_open(API_WS, await ws_ticket(stack, "izmir_viewer"))
+    await ws_next(ws)
+    await ws_subscribe(ws, IZMIR.id)
+    started = time.monotonic()
+    compose("restart", "api")
+    dropped = await ws_closed_with(ws, 40) is not None
+    back: dict[str, Any] | None = None
+    while back is None and time.monotonic() - started < 60:
+        try:
+            ticket = await ws_ticket(stack, "izmir_viewer")
+            fresh = await ws_open(API_WS, ticket)
+            back = await ws_next(fresh)
+            await fresh.close()
+        except (httpx.HTTPError, OSError, websockets.WebSocketException):
+            await asyncio.sleep(1)
+    took = time.monotonic() - started
+    record(
+        "api restart: the socket drops and a reconnect with a new ticket works within 30 s",
+        dropped and back is not None and took < 30,
+        f"dropped={dropped}, back after {took:.0f} s",
+    )
+
+
 async def main() -> int:
     skip_reactive, skip_restart = "--skip-reactive" in sys.argv, "--skip-restart" in sys.argv
     stack = Stack()
@@ -619,10 +912,19 @@ async def main() -> int:
             ("spike", lambda: check_spike(stack)),
             ("restart and rule change", lambda: check_restart_and_rule_change(stack, skip_restart)),
             ("dead letter", lambda: check_dead_letter(stack)),
+            ("websocket tickets", lambda: check_ws_tickets(stack)),
+            ("websocket scope", lambda: check_ws_scope(stack)),
+            ("websocket alarm flow", lambda: check_ws_alarm_flow(stack)),
+            ("websocket resilience", lambda: check_ws_resilience(stack, skip_restart)),
         ]
         if not skip_reactive:
             steps.append(("reactive ratio", lambda: check_reactive(stack)))
+        only = next(
+            (a.split("=", 1)[1].split(",") for a in sys.argv if a.startswith("--only=")), None
+        )
         for name, step in steps:
+            if only is not None and name not in only:
+                continue
             try:
                 await step()
             except Exception as exc:  # one broken step must not hide the others

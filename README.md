@@ -4,8 +4,9 @@ Industrial telemetry platform. A simulator publishes measurements from 7 devices
 over MQTT (TLS + per-device ACL) to an ingestion service, which writes them to TimescaleDB and
 publishes them to RabbitMQ. An alarm service evaluates rules on that stream (hysteresis, duration,
 reactive-energy ratio) and a REST API (JWT, three roles, strict per-site isolation) serves
-devices, time series, daily consumption, alarms and rule management. The dashboard and the live
-WebSocket come on days 3-4.
+devices, time series, daily consumption, alarms and rule management. A Next.js dashboard (Turkish
+interface, light and dark) shows the devices, a live chart, the daily energy and the alarms, and
+updates over a WebSocket without a page refresh.
 
 ```
 simulator --MQTT 5, QoS 1, TLS--> mosquitto --$share--> ingestion --+--> TimescaleDB (measurements + outbox)
@@ -18,6 +19,11 @@ simulator --MQTT 5, QoS 1, TLS--> mosquitto --$share--> ingestion --+--> Timesca
                           alarm service --alarms--> TimescaleDB <--reads (tenant-scoped)-- API (FastAPI, JWT)
                                  |                                                              |
                                  +----------- alarm.opened / .cleared --> Redis <---- sessions, login limit, .acknowledged
+                                                                            ^
+ ingestion ---- measurement events after the commit -----------------------+
+                                                                            | one PSUBSCRIBE per API process
+ browser <--HTTP + WebSocket-- Caddy :8080 --/api/*--> API (REST, /ws hub) -+
+                                        \--the rest--> Next.js (web)
 ```
 
 `seed/demo.yaml` is the single source of truth: the database seed, the Mosquitto password/ACL
@@ -34,12 +40,14 @@ make up          # .env with random secrets, TLS certs, MQTT users/ACL, then tim
 make seed        # demo org, 2 sites, 7 devices, 5 users, 4 alarm rules (idempotent)
 make simulate    # start the field simulator
 make smoke       # automated day-1 checks
+make web-install && make web-dev   # optional: the dashboard with hot reload on http://127.0.0.1:3000 (needs Node 24)
 make e2e         # automated day-2 checks: authorization matrix, alarm lifecycle, restart, dead letters (about 15 minutes)
 make fault DEVICE=izmir-komp-1 KIND=overheat   # trigger an overheat: a critical alarm opens after 30 s
 ```
 
-Then open Swagger at <http://127.0.0.1:8000/api/v1/docs>, sign in with `POST /auth/login` as one
-of the demo users, press *Authorize* and paste the `access_token`.
+Then open the dashboard at <http://127.0.0.1:8080> and sign in as one of the demo users below.
+Swagger is at <http://127.0.0.1:8000/api/v1/docs> (`POST /auth/login`, *Authorize*, paste the
+`access_token`).
 
 Demo logins (seeded): `admin@demo.hastori.local` (system admin), `izmir.admin@demo.hastori.local`
 and `antalya.admin@demo.hastori.local` (site admins), `izmir.izleyici@demo.hastori.local` and
@@ -82,8 +90,9 @@ capabilities and a memory limit.
 | `make fault`     | `uv run python scripts/fault.py izmir-komp-1 overheat 120` |
 | `make smoke`     | `uv run python scripts/smoke.py` |
 | `make smoke-quick` | `uv run python scripts/smoke.py --no-fault` |
-| `make resilience`| `uv run python scripts/resilience.py` (about 15 minutes; `--quick` skips the 6 minute outage) |
-| `make e2e`       | `uv run python scripts/e2e.py` (about 15 minutes; `--skip-reactive`, `--skip-restart`) |
+| `make resilience`| `uv run python scripts/resilience.py` (about 30 minutes; `--quick` skips the 6 minute ingestion outage, `--alarm-only` runs just the alarm service drills) |
+| `make e2e`       | `uv run python scripts/e2e.py` (about 25 minutes; `--skip-reactive`, `--skip-restart`) |
+| `make web-install`, `make web-dev` | `cd web; npm ci` once, then `npm run dev` (dashboard on `http://127.0.0.1:3000`, `/api` is forwarded to the API on 8000, the WebSocket goes to 8000 directly) |
 | `make reset-alarm-queue` | `uv run python scripts/reset_alarm_queue.py` (then `docker compose restart ingestion alarm`) |
 | `make test`      | `uv run pytest` |
 | `make lint`      | `uv run ruff check .; uv run ruff format --check .; uv run mypy packages services scripts tests conftest.py` |
@@ -100,6 +109,7 @@ seen; use `make smoke-quick` whenever alarms are being tested. `compensation_fai
 
 | Service | URL |
 |---------|-----|
+| **Dashboard** (Caddy: pages, REST and WebSocket on one origin) | `http://127.0.0.1:8080` |
 | REST API, Swagger | `http://127.0.0.1:8000/api/v1`, `/api/v1/docs`, `/api/v1/openapi.json`; `/healthz`, `/readyz` |
 | Alarm service health / readiness / metrics | `http://127.0.0.1:8003/healthz`, `/readyz`, `/metrics` |
 | Ingestion health / readiness / metrics | `http://127.0.0.1:8001/healthz`, `/readyz`, `/metrics` |
@@ -125,6 +135,7 @@ front.
 | `GET /alarms`, `GET /alarms/{id}`, `POST /alarms/{id}/ack` | history, one alarm with its timeline, acknowledge |
 | `GET`/`POST`/`PUT`/`DELETE /alarm-rules` | rule management (site admins for their sites); `DELETE` disables |
 | `GET`/`POST /users`, `GET`/`PATCH /users/{id}` | user management (system admin) |
+| `POST /ws-ticket`, `GET /ws?ticket=` (WebSocket) | live measurements and alarm events of one site at a time (see "Dashboard (day 3)") |
 
 A user sees only the sites assigned to them (a system admin sees all sites of the organisation).
 An object of another site answers **404**, a role that may not do something **403**, a missing or
@@ -196,6 +207,65 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
 - **Seed**: by default it never overwrites what people changed (users' e-mail, role and
   password hash, a site's name, city and time zone, a device's name and active flag, alarm rules);
   `make seed-reset` does.
+
+### Dashboard (day 3)
+
+| Dashboard (dark) | Daily energy and open alarm | Light theme |
+|---|---|---|
+| ![Device cards and the live chart](docs/img/dashboard-dark.jpg) | ![Daily kWh with a partial day, open alarm](docs/img/dashboard-energy-dark.jpg) | ![Light theme](docs/img/dashboard-light.jpg) |
+
+| Alarms (site admin: acknowledge button) | Alarm detail |
+|---|---|
+| ![Open alarm and history](docs/img/alarms-admin.jpg) | ![Detail with the thresholds it opened with](docs/img/alarm-detail.jpg) |
+
+Screenshots are of the packaged stack on `http://127.0.0.1:8080` at a narrow window, so the layout
+is the single-column one; on a wide screen the chart, the daily energy and the open alarms sit side by side.
+
+- **One origin.** In the packaged stack Caddy listens on `127.0.0.1:8080` and sends `/api/*` (REST
+  and the WebSocket) to the API and everything else to the Next.js server, so the refresh cookie
+  (`SameSite=Strict`, `Path=/api/v1/auth`) is first-party and the socket needs no CORS. With
+  `make web-dev` the same job is done by a Next.js rewrite. Caddy's access log drops the
+  WebSocket ticket from the query string. TLS, rate limits and the real client address are day 4.
+- **Why Next.js, and how little of it is used.** It is the stack of the brief. Used: the App Router for layouts
+  and the dynamic `/sites/[siteId]` routes, a server-rendered page skeleton, the standalone
+  output for a small image, and `proxy.ts` for a per-request CSP nonce. Not used: Server Actions
+  or server-side data fetching. The refresh cookie only travels to `/api/v1/auth`, so the Next.js
+  server cannot know who is signed in; all data is fetched by the browser with the user's access
+  token. Anything that renders data, formats a time or draws a chart is a client component.
+- **Session.** The access token lives in memory only (not in `localStorage`, not in a cookie
+  JavaScript can read). On every page load the httpOnly refresh cookie is exchanged for a new one;
+  parallel 401s share one refresh and each request is retried once; a 503 waits for `Retry-After`.
+  After sign-out the refresh answers 401.
+- **WebSocket.** A browser cannot set an `Authorization` header on a socket, and a token in the URL
+  ends up in logs and history, so the page first asks `POST /ws-ticket` (bearer) for a ticket:
+  32 random bytes, kept in Redis as a SHA-256 for 30 s, consumed with `GETDEL` when the socket
+  opens (a second use closes with 4401). The user's `SiteScope` is built from the database when
+  the socket opens and the client subscribes to **one site at a time**; a site outside the scope
+  closes the socket with 4403, the socket's version of the REST 404. A browser `Origin` that is not
+  in `WS_ALLOWED_ORIGINS` is refused with 403. A connection lives at most 15 minutes (4408) and
+  the page reconnects with a new ticket, so a changed role or site list takes effect within 15
+  minutes at the latest.
+- **Events are hints, REST is the truth.** One Redis `PSUBSCRIBE hastori:site:*` per API process
+  feeds a hub that routes by site. Pub/sub can lose a message, so the server sends `resync` right
+  after a subscription and to everyone when its Redis link comes back, and the page then fetches
+  the current state over REST (the alarm list also refreshes every 60 s). Every connection has its
+  own 256-message queue and writer task: a slow client is closed with 1013 and nobody else waits.
+  The server sends `hb` every 25 s (Cloudflare drops a silent socket at about 100 s); the page
+  reconnects after 60 s without any message, with a 1 s to 30 s randomised backoff.
+- **Measurements.** After each batch commits, ingestion publishes one `MeasurementEvent` per
+  sample to the site's channel from a separate task with its own bounded queue: a Redis outage
+  costs live events (`ingest_event_publish_failures_total`), never a write, an ack or the outbox,
+  and it does not stop the chart when the alarm service is down.
+- **The chart.** One REST read for the last 15 minutes, then the socket appends; the window slides,
+  the chart redraws at most once a second without animation, and the axis reaches the latest point
+  when a device clock is ahead. "Online" is "a reading reached this screen in the last 30 s".
+- **Daily kWh** shows today's value with its coverage; a day with less than 95 % of its minutes
+  is drawn dashed and labelled as partial, never as a complete day. The sample data only has the
+  days the stack has been running.
+- **Alarms** open and acknowledge without a refresh; the acknowledge button exists for site and
+  system admins only (the API enforces it again), a 409 says someone else got there first. An
+  alarm keeps the thresholds it opened with (`alarms.threshold`, `clear_threshold`), so editing a
+  rule later does not change what the history says.
 
 ### Alarm service (day 2)
 
@@ -273,7 +343,7 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
 
 `make test` needs no Docker: it starts a real PostgreSQL (the `pgserver` package) and a Redis that
 runs Lua (`fakeredis`), builds the schema with the real migrations and runs the services against
-them: about 230 tests, several of them on the properties that matter most (the state machine in
+them: about 280 Python tests (plus 40 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
 virtual time including a restart after every possible sample; the authorization matrix; refresh
 token rotation under parallel requests). What this cannot show is TimescaleDB itself (migration
 `0002` is replaced by a plain table and view with the same columns), RabbitMQ, the MQTT broker and
@@ -281,10 +351,22 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 
 ## Known limits
 
+- **One main meter per site.** The daily kWh sums the site's main panel (the energy analyzer). A
+  site with two panels in series would be counted twice; the demo sites have one. When a second
+  panel arrives, `sites.main_meter_device_id` is the way to say which one counts.
+- **A device clock set back (B3).** A sample 60 s or more behind the device's newest one restarts
+  that device's sequence (`alarm_clock_jumps_total`), so the alarm keeps working. Right after the
+  alarm service starts, a jump deeper than the start-up replay window (15 minutes) looks like a
+  queued backlog until a live reading arrives, and is ignored until then. Smaller slips are still
+  dropped as out of order.
+- The dashboard has no user or site management screens, no `no_data` alarm (a silent device shows
+  a "Çevrimdışı" badge) and no per-user language: the interface is Turkish, code and docs English.
+
 - The alarm service evaluates in one process (one active queue consumer): at demo load (about 3.5
   messages per second) that is far from a limit; sharding by device is the way beyond it.
 - There is no "device offline" alarm: a silent device keeps its open alarm and shows
-  `online: false` in the device list. A pending count that would span a silence restarts.
+  `online: false` in the device list and an offline badge on its card. A pending count that would
+  span a silence restarts.
 - A password change does not end the user's refresh sessions (the access token is checked against
   the database on every request, the refresh token only against Redis).
 - The login limiter counts per e-mail address and client address; an attacker who rotates
@@ -313,8 +395,8 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 - Postgres, RabbitMQ, Mosquitto and Redis data volumes are plain Docker volumes: back them up
   before `docker compose down -v`. Redis holds sessions only; losing it signs everybody out.
 - No `LICENSE` file yet: the licence is the owner's choice.
-- `docs/design-risks.md` lists the risks of what is *not built yet* (WebSocket, dashboard,
-  gateway, CI, public hosting) and what is still open of the rest.
+- `docs/design-risks.md` lists the risks of what is *not built yet* (gateway hardening, CI,
+  public hosting) and what is still open of the rest.
 - Mosquitto TLS uses a local demo CA (`make certs`); not for production. The CA key is kept in
   `infra/mosquitto/certs/` (git-ignored) so the server certificate can be renewed.
 - The simulator keeps its state in memory; a restart starts every temperature from its normal
@@ -330,4 +412,4 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
   through an outbox like the telemetry, so a Redis outage cannot hide an alarm from live screens.
 - Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
   them at once; the access token's lifetime is the only window left.
-- Redis, Caddy, Grafana and CI are deliberately deferred to days 3-4.
+- Grafana, TLS and rate limits in Caddy, and CI are deliberately deferred to day 4.
