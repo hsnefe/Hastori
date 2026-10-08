@@ -55,7 +55,10 @@ SEED = load_seed()
 IZMIR = SEED.site_by_key("izmir")
 KOMP1 = SEED.device_by_key("izmir-komp-1")
 PANO = SEED.device_by_key("izmir-pano")
-TEMP_RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-komp-1")
+TEMP_RULE = next(
+    r for r in SEED.alarm_rules if r.device == "izmir-komp-1" and r.kind == "threshold"
+)
+SILENCE_RULE = next(r for r in SEED.alarm_rules if r.kind == "no_data")
 RATIO_RULE = next(r for r in SEED.alarm_rules if r.device == "izmir-pano")
 
 API = "http://127.0.0.1:8000/api/v1"
@@ -445,6 +448,60 @@ async def check_spike(stack: Stack) -> None:
     )
     mine = [a for a in listing.json()["items"] if a["rule_id"] == str(TEMP_RULE.id)]
     record("a single 90 C reading opens no alarm", mine == [], f"{len(mine)} alarms")
+
+
+async def check_no_data(stack: Stack) -> None:
+    """A device that stops publishing opens the no_data alarm, and it closes by itself when the
+    data returns. The rest of the pipeline keeps running, which is what makes it the device's."""
+    admin = stack.clients["izmir_admin"]
+    stack.events.clear()
+    started = time.time()
+    await stack.fault("izmir-komp-1", "offline", 100)
+    alarm = await wait_for(lambda: active_alarm(stack, SILENCE_RULE.id), seconds=110)
+    record("offline device: the no_data alarm opens", alarm is not None)
+    if alarm is None:
+        return
+    gap = parse_time(alarm["opened_at"]).timestamp() - started
+    limit = SILENCE_RULE.duration_s
+    # the last reading was up to 2 s before the fault, the alarm is looked for every 5 s
+    record(
+        f"...when the {limit} s limit is crossed, not when it is noticed",
+        limit - 4 <= gap <= limit + 8,
+        f"{gap:.1f} s after the fault",
+    )
+    record("...as a warning, on the device", alarm["severity"] == "warning")
+    devices = (await admin.get(f"/sites/{IZMIR.id}/devices")).json()
+    others = [d for d in devices if d["id"] != str(KOMP1.id)]
+    record(
+        "the other devices of the site are still reporting",
+        bool(others) and all(d["online"] for d in others),
+    )
+    detail = (await admin.get(f"/alarms/{alarm['id']}")).json()
+    record(
+        "the alarm says what kind of rule it is",
+        detail["rule"]["kind"] == "no_data" and detail["rule"]["metric"] == "temperature_c",
+    )
+
+    async def closed() -> dict[str, Any] | None:
+        d = (await admin.get(f"/alarms/{alarm['id']}")).json()
+        return d if d["state"] == "cleared" else None
+
+    final = await wait_for(closed, seconds=120, every=3)
+    record("...and it closes by itself when the data returns", final is not None)
+    if final:
+        # the silence it ended: from the last reading before the fault to the first one after it
+        record(
+            "peak value is the length of the silence",
+            final["peak_value"] is not None and 90 <= final["peak_value"] <= 115,
+            str(final["peak_value"]),
+        )
+    await asyncio.sleep(1)
+    kinds = event_types(stack.events, alarm["id"])
+    record(
+        "Redis events: opened, cleared (in order)",
+        kinds == ["alarm.opened", "alarm.cleared"],
+        str(kinds),
+    )
 
 
 async def alarm_service_ready() -> bool:
@@ -910,6 +967,7 @@ async def main() -> int:
             ("eval lag", lambda: check_eval_lag(stack)),
             ("overheat lifecycle", lambda: check_overheat_lifecycle(stack)),
             ("spike", lambda: check_spike(stack)),
+            ("no data", lambda: check_no_data(stack)),
             ("restart and rule change", lambda: check_restart_and_rule_change(stack, skip_restart)),
             ("dead letter", lambda: check_dead_letter(stack)),
             ("websocket tickets", lambda: check_ws_tickets(stack)),

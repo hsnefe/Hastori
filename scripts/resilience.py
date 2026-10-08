@@ -405,7 +405,7 @@ async def alarm_drill(
     rows = await fetch(
         s,
         "SELECT r.id FROM alarm_rules r JOIN devices d ON d.id = r.device_id "
-        "WHERE d.key = $1 AND r.metric = 'temperature_c' AND r.enabled",
+        "WHERE d.key = $1 AND r.metric = 'temperature_c' AND r.kind = 'threshold' AND r.enabled",
         ALARM_DEVICE,
     )
     rule_id = rows[0]["id"]
@@ -503,6 +503,95 @@ async def drill_alarm_exits_by_itself(s: Settings) -> None:
     record("alarm: docker's restart counter went up (the drill did not start it)", restarted)
 
 
+async def silence_rule_id(s: Settings) -> object:
+    rows = await fetch(
+        s,
+        "SELECT r.id FROM alarm_rules r JOIN devices d ON d.id = r.device_id "
+        "WHERE d.key = $1 AND r.kind = 'no_data' AND r.enabled",
+        ALARM_DEVICE,
+    )
+    return rows[0]["id"]
+
+
+async def wait_no_silence_alarm(s: Settings, rule_id: object, max_wait_s: float = 150) -> bool:
+    """No open no_data alarm: an earlier drill must be over before the next one starts."""
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        (open_now,) = await fetch(
+            s, "SELECT count(*) AS n FROM alarms WHERE rule_id = $1 AND state <> 'cleared'", rule_id
+        )
+        if open_now["n"] == 0:
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
+async def pipeline_outage_drill(
+    s: Settings, label: str, stop: str, outage_s: float, settle_s: float = 45
+) -> None:
+    """A service of the pipeline is away for longer than the no_data limit (60 s). The devices
+    never went silent, the pipeline did: nobody may be blamed, not while it is down and not in the
+    first seconds after it is back, when the old devices have not been heard from yet."""
+    rule_id = await silence_rule_id(s)
+    if not await wait_no_silence_alarm(s, rule_id):
+        record(label, False, "a no_data alarm was still open before the drill")
+        return
+    t0 = time.time()
+    compose("stop", stop)
+    await asyncio.sleep(outage_s)
+    compose("start", stop)
+    await wait_ready(s, 120)
+    await wait_alarm_ready(s)
+    await asyncio.sleep(settle_s)  # long enough for a false alarm to open and be written
+    found = await alarms_since(s, rule_id, t0)
+    record(label, found == [], f"{len(found)} no_data alarm(s) opened")
+
+
+async def drill_no_data_ingestion_outage(s: Settings) -> None:
+    await pipeline_outage_drill(
+        s, "no_data: ingestion down 90 s, no device is blamed", "ingestion", 90
+    )
+
+
+async def drill_no_data_rabbitmq_outage(s: Settings) -> None:
+    await pipeline_outage_drill(
+        s, "no_data: rabbitmq down 90 s, no device is blamed", "rabbitmq", 90
+    )
+
+
+async def drill_no_data_alarm_restart(s: Settings) -> None:
+    """The device really goes quiet and the alarm service is killed while the alarm is open: the
+    restarted service adopts the alarm instead of opening a second one, and closes it when the
+    data returns."""
+    rule_id = await silence_rule_id(s)
+    label = "no_data: kill -9 of the alarm service while the alarm is open"
+    if not await wait_no_silence_alarm(s, rule_id):
+        record(label, False, "a no_data alarm was still open before the drill")
+        return
+    t0 = time.time()
+    inject_fault(s, "offline", 130)
+    found: list[asyncpg.Record] = []
+    deadline = time.monotonic() + 100
+    while time.monotonic() < deadline and not found:
+        found = await alarms_since(s, rule_id, t0)
+        if not found:
+            await asyncio.sleep(2)
+    compose("kill", "-s", "SIGKILL", "alarm")
+    await asyncio.sleep(10)
+    compose("start", "alarm")
+    await wait_alarm_ready(s)
+    closed = False
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline and found and not closed:
+        found = await alarms_since(s, rule_id, t0)
+        closed = bool(found) and all(a["state"] == "cleared" for a in found)
+        if not closed:
+            await asyncio.sleep(2)
+    await asyncio.sleep(5)
+    found = await alarms_since(s, rule_id, t0)
+    record(label, len(found) == 1 and closed, f"{len(found)} alarm(s), closed={closed}")
+
+
 async def main() -> None:
     s = get_settings()
     quick = "--quick" in sys.argv
@@ -513,6 +602,9 @@ async def main() -> None:
         drill_alarm_kill,
         drill_alarm_db_outage,
         drill_alarm_exits_by_itself,
+        drill_no_data_ingestion_outage,
+        drill_no_data_rabbitmq_outage,
+        drill_no_data_alarm_restart,
     ]
     drills = [
         drill_ingestion_restart,
