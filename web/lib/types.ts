@@ -94,13 +94,16 @@ export interface TimelineEntry {
   by: string | null;
 }
 
+/** no_data: the metric stopped arriving for `duration_s` seconds (no thresholds). */
+export type RuleKind = "threshold" | "reactive_ratio" | "no_data";
+
 export interface Rule {
   id: string;
   device_id: string;
   device_name: string;
   site_id: string;
   name: string;
-  kind: "threshold" | "reactive_ratio";
+  kind: RuleKind;
   metric: Metric;
   operator: ">" | "<";
   threshold: number;

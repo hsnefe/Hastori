@@ -96,6 +96,7 @@ describe("rule values", () => {
     const { formatRuleValue } = await import("@/lib/format");
     expect(formatRuleValue("reactive_ratio", "reactive_power_kvar", 0.18)).toBe("0,180");
     expect(formatRuleValue("threshold", "temperature_c", 80)).toBe("80,0 °C");
+    expect(formatRuleValue("no_data", "temperature_c", 122)).toBe("2 dk 2 sn"); // a silence, not a °C
   });
 });
 

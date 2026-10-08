@@ -95,6 +95,7 @@ export function RulesPage({ siteId }: { siteId: string }) {
 }
 
 function condition(rule: Rule): string {
+  if (rule.kind === "no_data") return `${METRICS[rule.metric].label} verisi ${rule.duration_s} sn gelmezse`;
   const unit = rule.kind === "reactive_ratio" ? "" : ` ${METRICS[rule.metric].unit}`;
   const base = `${METRICS[rule.metric].label} ${rule.operator} ${formatNumber(rule.threshold, rule.kind === "reactive_ratio" ? 3 : 1)}${unit}`;
   return rule.kind === "reactive_ratio" ? `Reaktif oran ${rule.operator} ${formatNumber(rule.threshold, 3)} (${Math.round((rule.window_s ?? 0) / 60)} dk)` : base;
@@ -107,7 +108,7 @@ function RuleRow({ rule, siteId, editable, onEdit }: { rule: Rule; siteId: strin
       <td>{rule.name}</td>
       <td>{rule.device_name}</td>
       <td>{condition(rule)}</td>
-      <td>{formatNumber(rule.clear_threshold, rule.kind === "reactive_ratio" ? 3 : 1)}</td>
+      <td>{rule.kind === "no_data" ? "veri gelince" : formatNumber(rule.clear_threshold, rule.kind === "reactive_ratio" ? 3 : 1)}</td>
       <td>{rule.duration_s} sn</td>
       <td>
         <span className={`sev sev-${rule.severity}`}>{SEVERITIES[rule.severity]}</span>
@@ -163,10 +164,12 @@ function RuleEditor({ rule, siteId, onDone }: { rule: Rule; siteId: string; onDo
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    const t = parseDecimal(threshold);
-    const c = parseDecimal(clear);
+    const silence = rule.kind === "no_data"; // no thresholds: only the time limit is edited
+    const t = silence ? 0 : parseDecimal(threshold);
+    const c = silence ? 0 : parseDecimal(clear);
     const d = parseInteger(duration);
     if (t === null || c === null) return setError("Eşikler sayı olmalı (örnek: 80 ya da 0,18; binlik ayracı yok).");
+    if (silence && (d === null || d < 10 || d > 600)) return setError("Süre 10 ile 600 sn arasında tam sayı olmalı.");
     if (d === null || d > 600) return setError("Süre 0 ile 600 sn arasında tam sayı olmalı.");
     if (rule.operator === ">" && c > t) return setError("Kapanma eşiği eşikten büyük olamaz.");
     if (rule.operator === "<" && c < t) return setError("Kapanma eşiği eşikten küçük olamaz.");
@@ -179,13 +182,22 @@ function RuleEditor({ rule, siteId, onDone }: { rule: Rule; siteId: string; onDo
     <tr className="editing">
       <td>{rule.name}</td>
       <td>{rule.device_name}</td>
-      <td>
-        {rule.kind === "reactive_ratio" ? "Reaktif oran" : METRICS[rule.metric].label} {rule.operator}{" "}
-        <input form={form} aria-label="Eşik" inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} size={7} />
-      </td>
-      <td>
-        <input form={form} aria-label="Kapanma eşiği" inputMode="decimal" value={clear} onChange={(e) => setClear(e.target.value)} size={7} />
-      </td>
+      {rule.kind === "no_data" ? (
+        <>
+          <td>{METRICS[rule.metric].label} verisi gelmezse</td>
+          <td>veri gelince</td>
+        </>
+      ) : (
+        <>
+          <td>
+            {rule.kind === "reactive_ratio" ? "Reaktif oran" : METRICS[rule.metric].label} {rule.operator}{" "}
+            <input form={form} aria-label="Eşik" inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} size={7} />
+          </td>
+          <td>
+            <input form={form} aria-label="Kapanma eşiği" inputMode="decimal" value={clear} onChange={(e) => setClear(e.target.value)} size={7} />
+          </td>
+        </>
+      )}
       <td>
         <input form={form} aria-label="Süre (sn)" inputMode="numeric" value={duration} onChange={(e) => setDuration(e.target.value)} size={4} /> sn
       </td>

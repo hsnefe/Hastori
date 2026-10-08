@@ -2,7 +2,7 @@
 // components that render data (never during server rendering of a page without data), so the
 // server's own locale and zone cannot leak into the markup.
 
-import type { Metric } from "./types";
+import type { Metric, RuleKind } from "./types";
 
 export const LOCALE = "tr-TR";
 
@@ -34,8 +34,12 @@ export function formatMetric(metric: Metric, value: number): string {
   return `${formatNumber(value, m.digits)} ${m.unit}`;
 }
 
-/** A rule's value: a measured quantity with its unit, or (reactive_ratio rules) a plain ratio. */
-export function formatRuleValue(kind: "threshold" | "reactive_ratio", metric: Metric, value: number): string {
+/**
+ * A rule's value: a measured quantity with its unit, a plain ratio (reactive_ratio rules) or, for
+ * no_data rules, the length of the silence.
+ */
+export function formatRuleValue(kind: RuleKind, metric: Metric, value: number): string {
+  if (kind === "no_data") return formatDuration(value);
   return kind === "reactive_ratio" ? formatNumber(value, 3) : formatMetric(metric, value);
 }
 

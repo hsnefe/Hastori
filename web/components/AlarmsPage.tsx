@@ -169,14 +169,23 @@ function AlarmDetailPanel({ alarmId, timeZone, onClose }: { alarmId: string; tim
             <dd>{METRICS[a.metric].label}</dd>
             <dt>Durum</dt>
             <dd>{ALARM_STATES[a.state]}</dd>
-            <dt>Tepe değer</dt>
+            <dt>{a.rule.kind === "no_data" ? "Sessizlik süresi" : "Tepe değer"}</dt>
             <dd>{a.peak_value !== null ? formatRuleValue(a.rule.kind, a.metric, a.peak_value) : "—"}</dd>
-            <dt>Açılıştaki eşik</dt>
-            <dd>
-              {a.threshold !== null && a.clear_threshold !== null
-                ? `${a.rule.operator} ${formatRuleValue(a.rule.kind, a.metric, a.threshold)} (kapanma eşiği ${formatRuleValue(a.rule.kind, a.metric, a.clear_threshold)})`
-                : "Kayıtlı değil (alarm bu özellikten önce açıldı)"}
-            </dd>
+            {a.rule.kind === "no_data" ? (
+              <>
+                <dt>Kural</dt>
+                <dd>{METRICS[a.metric].label} verisi {formatDuration(a.rule.duration_s)} gelmezse açılır</dd>
+              </>
+            ) : (
+              <>
+                <dt>Açılıştaki eşik</dt>
+                <dd>
+                  {a.threshold !== null && a.clear_threshold !== null
+                    ? `${a.rule.operator} ${formatRuleValue(a.rule.kind, a.metric, a.threshold)} (kapanma eşiği ${formatRuleValue(a.rule.kind, a.metric, a.clear_threshold)})`
+                    : "Kayıtlı değil (alarm bu özellikten önce açıldı)"}
+                </dd>
+              </>
+            )}
             {a.rule.kind === "reactive_ratio" ? (
               <>
                 <dt>Kural</dt>
