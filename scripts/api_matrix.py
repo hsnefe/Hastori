@@ -111,6 +111,13 @@ def _sites_seen(actor: str, body: Any) -> str | None:
     return None if names == want else f"sees {names}, should see {want}"
 
 
+def _is_ticket(actor: str, body: Any) -> str | None:
+    ok = (
+        isinstance(body.get("ticket"), str) and len(body["ticket"]) >= 40 and body["expires_in"] > 0
+    )
+    return None if ok else f"not a ticket: {str(body)[:80]}"
+
+
 def _only_own_sites(ids: Ids) -> Callable[[str, Any], str | None]:
     def check(actor: str, body: Any) -> str | None:
         allowed = {
@@ -131,6 +138,7 @@ def cases(ids: Ids) -> list[Case]:
     out = [
         Case("GET /sites", "GET", "/sites", EVERYONE_SIGNED_IN, check=_sites_seen),
         Case("GET /auth/me", "GET", "/auth/me", EVERYONE_SIGNED_IN),
+        Case("WebSocket ticket", "POST", "/ws-ticket", EVERYONE_SIGNED_IN, check=_is_ticket),
         # a site, its devices, its consumption
         Case("devices of İzmir", "GET", f"/sites/{ids.izmir_site}/devices", IZMIR_ONLY),
         Case("devices of Antalya", "GET", f"/sites/{ids.antalya_site}/devices", ANTALYA_ONLY),
@@ -316,6 +324,7 @@ def _rule_body() -> dict[str, Any]:
 # Every endpoint that needs a token, asked without one (and with a bad one): always 401.
 UNAUTHENTICATED: list[tuple[str, str]] = [
     ("GET", "/auth/me"),
+    ("POST", "/ws-ticket"),
     ("GET", "/sites"),
     ("POST", "/sites"),
     ("PATCH", f"/sites/{ZERO}"),

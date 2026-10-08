@@ -58,6 +58,11 @@ class TokenOut(BaseModel):
     expires_in: int = Field(description="seconds until the access token expires")
 
 
+class WsTicketOut(BaseModel):
+    ticket: str = Field(description="single use; open /api/v1/ws?ticket=<this>")
+    expires_in: int = Field(description="seconds until the ticket expires")
+
+
 class LoginIn(BaseModel):
     email: str = Field(min_length=3, max_length=254, examples=["izmir.admin@demo.hastori.local"])
     password: str = Field(min_length=1, max_length=256)

@@ -8,8 +8,9 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from hastori_api.errors import install_error_handlers
+from hastori_api.live import Hub
 from hastori_api.ratelimit import LoginLimiter
-from hastori_api.routers import alarm_rules, alarms, auth, devices, health, sites, users
+from hastori_api.routers import alarm_rules, alarms, auth, devices, health, live, sites, users
 from hastori_api.tokens import RefreshStore
 from hastori_common.settings import Settings
 
@@ -32,6 +33,7 @@ TAGS = [
     {"name": "alarms", "description": "Alarm history, acknowledgement"},
     {"name": "alarm-rules", "description": "Alarm rule management (admins)"},
     {"name": "users", "description": "User management (system admin)"},
+    {"name": "live", "description": "WebSocket ticket and live updates"},
     {"name": "health", "description": "Liveness and readiness"},
 ]
 
@@ -46,8 +48,10 @@ def create_app(
     """`owns_resources`: close the engine and Redis client when the application stops."""
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.hub.start()
         yield
+        await app.state.hub.stop()
         if owns_resources:
             await redis.aclose()
             await engine.dispose()
@@ -67,6 +71,7 @@ def create_app(
     app.state.engine = engine
     app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     app.state.redis = redis
+    app.state.hub = Hub(redis)
     app.state.limiter = LoginLimiter(redis)
     app.state.refresh_store = RefreshStore(
         redis, ttl_s=settings.refresh_token_ttl_s, grace_s=settings.refresh_grace_s
@@ -81,6 +86,7 @@ def create_app(
         alarms.router,
         alarm_rules.router,
         users.router,
+        live.router,
     ):
         v1.include_router(router)
     app.include_router(v1)

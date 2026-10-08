@@ -47,6 +47,16 @@ class Settings(BaseSettings):
     # Secure cookies need HTTPS (browsers exempt localhost); switch on behind the gateway.
     cookie_secure: bool = False
 
+    # Browsers always send Origin on a WebSocket handshake; one that is not listed here is refused.
+    # A client without Origin (a script) is not a browser and is let through: the ticket is the key.
+    ws_allowed_origins: str = (
+        "http://127.0.0.1:8080,http://localhost:8080,http://127.0.0.1:3000,http://localhost:3000"
+    )
+    ws_ticket_ttl_s: int = 30
+    ws_max_age_s: float = 15 * 60
+    ws_heartbeat_s: float = 25.0
+    ws_queue_size: int = 256
+
     seed_system_admin_password: str = "admin_demo_pw"
     seed_site_admin_password: str = "siteadmin_demo_pw"
     seed_viewer_password: str = "viewer_demo_pw"
@@ -63,6 +73,10 @@ class Settings(BaseSettings):
     ingest_shutdown_deadline_s: float = 20.0
     alarm_shutdown_deadline_s: float = 20.0
     log_level: str = "INFO"
+
+    @property
+    def ws_origins(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.ws_allowed_origins.split(",") if o.strip()]
 
     @field_validator("mqtt_ca_file")
     @classmethod

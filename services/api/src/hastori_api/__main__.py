@@ -19,7 +19,14 @@ def main() -> None:
         pool_pre_ping=True,
         connect_args={"command_timeout": 30},
     )
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    redis = Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        # The WebSocket hub sits on one pub/sub connection for days: a link that died silently
+        # (a dropped network, a restarted Redis behind NAT) must be noticed, not waited on.
+        health_check_interval=15,
+        socket_keepalive=True,
+    )
     app = create_app(settings, engine, redis, owns_resources=True)
     logging.getLogger("api").info("starting", extra={"port": settings.api_http_port})
     uvicorn.run(app, host="0.0.0.0", port=settings.api_http_port, log_level="warning")
