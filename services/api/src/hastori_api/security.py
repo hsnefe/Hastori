@@ -1,14 +1,16 @@
 """Access tokens (JWT, HS256) and password verification."""
 
 import asyncio
+import contextlib
 import time
 import uuid
+from collections.abc import AsyncIterator
 
 import jwt
 from pwdlib import PasswordHash
 from pwdlib.exceptions import PwdlibError
 
-from hastori_api.errors import unauthorized
+from hastori_api.errors import HashQueueFull, unauthorized
 from hastori_common.settings import Settings
 
 ALGORITHM = "HS256"
@@ -32,8 +34,28 @@ def _slots() -> asyncio.Semaphore:
     return _hash_slots[1]
 
 
+# Sign-in is unauthenticated and each hash takes ~100 ms of a slot: an unbounded wait queue would
+# let a flood of logins hold every request (and database connection) behind it. Beyond this many
+# waiting hashes the answer is a fast 503.
+MAX_PENDING_HASHES = 16
+_pending = 0
+
+
+@contextlib.asynccontextmanager
+async def _hash_slot() -> AsyncIterator[None]:
+    global _pending
+    if _pending >= MAX_PENDING_HASHES:
+        raise HashQueueFull
+    _pending += 1
+    try:
+        async with _slots():
+            yield
+    finally:
+        _pending -= 1
+
+
 async def hash_password_async(password: str) -> str:
-    async with _slots():
+    async with _hash_slot():
         return await asyncio.to_thread(_hasher.hash, password)
 
 
@@ -81,10 +103,10 @@ async def verify_password(password: str, password_hash: str | None) -> bool:
     if password_hash is None:
         if _dummy_hash is None:
             _dummy_hash = await hash_password_async("hastori-no-such-user")
-        async with _slots():
+        async with _hash_slot():
             await asyncio.to_thread(_verify, password, _dummy_hash)
         return False
-    async with _slots():
+    async with _hash_slot():
         return await asyncio.to_thread(_verify, password, password_hash)
 
 

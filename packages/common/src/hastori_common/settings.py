@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     refresh_token_ttl_s: int = 7 * 24 * 3600
     # An already used refresh token still works this long (parallel tabs); later it means theft.
     refresh_grace_s: int = 20
+    # A session cannot be kept alive for ever by refreshing: after this long, sign in again.
+    refresh_max_life_s: int = 30 * 24 * 3600
     # Secure cookies need HTTPS (browsers exempt localhost); switch on behind the gateway.
     cookie_secure: bool = False
 
@@ -56,6 +58,15 @@ class Settings(BaseSettings):
     ws_max_age_s: float = 15 * 60
     ws_heartbeat_s: float = 25.0
     ws_queue_size: int = 256
+    # Open sockets cost a queue and three tasks each: bounded per user and in total.
+    ws_max_per_user: int = 5
+    ws_max_total: int = 500
+    ws_tickets_per_minute: int = 30
+    # Proxies whose X-Forwarded-For is believed (uvicorn --forwarded-allow-ips). Without the real
+    # client address every user behind the gateway shares one rate-limit key.
+    trusted_proxies: str = "127.0.0.1"
+    # Swagger UI and the OpenAPI document. Switch off for a demo reachable from the internet.
+    api_docs: bool = True
 
     seed_system_admin_password: str = "admin_demo_pw"
     seed_site_admin_password: str = "siteadmin_demo_pw"

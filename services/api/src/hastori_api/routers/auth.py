@@ -57,6 +57,17 @@ def _cleared_cookie_header(settings: Settings) -> dict[str, str]:
     }
 
 
+def _cookie_header(settings: Settings, token: str) -> dict[str, str]:
+    """The refresh cookie as a header, for an error response that must still deliver it."""
+    secure = "; Secure" if settings.cookie_secure else ""
+    return {
+        "Set-Cookie": (
+            f"{COOKIE}={token}; Max-Age={settings.refresh_token_ttl_s}; Path={COOKIE_PATH}; "
+            f"HttpOnly; SameSite=Strict{secure}"
+        )
+    }
+
+
 def _token_out(settings: Settings, user_id: uuid.UUID) -> TokenOut:
     return TokenOut(
         access_token=issue_access_token(settings, user_id), expires_in=settings.access_token_ttl_s
@@ -70,7 +81,8 @@ def _token_out(settings: Settings, user_id: uuid.UUID) -> TokenOut:
     description=(
         "Returns a short-lived access token (send it as `Authorization: Bearer ...`) and sets a "
         "refresh token in an httpOnly cookie. After 5 failed attempts for the same e-mail and "
-        "address, further attempts get 429 for 5 minutes."
+        "address, further attempts get 429 for 5 minutes (so do 30 failures from one address, "
+        "whatever the e-mail)."
     ),
     responses={
         401: {"model": ErrorResponse, "description": "Wrong e-mail or password"},
@@ -97,6 +109,9 @@ async def login(
             select(User.id, User.password_hash).where(func.lower(User.email) == email)
         )
     ).first()
+    # Hashing takes ~100 ms of CPU and may queue: do not hold a pooled connection meanwhile
+    # (ten simultaneous sign-ins would otherwise empty the pool for everybody else).
+    await session.close()
     ok = await verify_password(body.password, row.password_hash if row else None)
     if row is None or not ok:
         await limiter.failed(email, ip)
@@ -136,7 +151,19 @@ async def refresh(
         raise ApiError(401, "Refresh token was already used; sign in again", headers=gone)
     if rotation.status != "ok" or rotation.token is None or rotation.user_id is None:
         raise ApiError(401, "Invalid refresh token", headers=gone)
-    if await load_scope(session, rotation.user_id) is None:  # the user was removed meanwhile
+    try:
+        scope = await load_scope(session, rotation.user_id)
+    except Exception as exc:
+        # The token is already rotated. If the answer were a bare 503 the new cookie would never
+        # reach the browser, and after the grace window the old one would count as stolen and
+        # revoke the whole session. Deliver the cookie with the error; the client retries.
+        log.warning("refresh: user lookup failed", extra={"error": str(exc)[:200]})
+        raise ApiError(
+            503,
+            "A backing service is unavailable; try again shortly",
+            headers={"Retry-After": "2", **_cookie_header(settings, rotation.token)},
+        ) from exc
+    if scope is None:  # the user was removed meanwhile
         await store.revoke(rotation.token)
         raise ApiError(401, "Invalid refresh token", headers=gone)
     _set_cookie(response, settings, rotation.token)

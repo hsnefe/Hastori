@@ -29,7 +29,18 @@ def main() -> None:
     )
     app = create_app(settings, engine, redis, owns_resources=True)
     logging.getLogger("api").info("starting", extra={"port": settings.api_http_port})
-    uvicorn.run(app, host="0.0.0.0", port=settings.api_http_port, log_level="warning")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=settings.api_http_port,
+        log_level="warning",
+        # The gateway's X-Forwarded-For carries the real client; believe it only from our proxies.
+        # A client message is read whole before any size check: cap what uvicorn accepts (the
+        # protocol allows 4 KiB, see MAX_CLIENT_MESSAGE).
+        ws_max_size=8192,
+        proxy_headers=True,
+        forwarded_allow_ips=settings.trusted_proxies,
+    )
 
 
 if __name__ == "__main__":

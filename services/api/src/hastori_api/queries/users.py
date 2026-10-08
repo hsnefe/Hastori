@@ -75,11 +75,13 @@ async def create_user(session: AsyncSession, scope: SiteScope, body: UserCreate)
     scope.require_role(SYSTEM_ADMIN)
     if err := _unknown_sites(scope, body.site_ids):
         raise err
+    # Hash first: the session has not taken a pooled connection yet, and must not hold one while
+    # the (slow, queued) hash runs.
+    password_hash = await hash_password_async(body.password)
     email = body.email.strip()
     taken = await session.scalar(select(User.id).where(func.lower(User.email) == email.lower()))
     if taken is not None:
         raise conflict("A user with this e-mail address already exists")
-    password_hash = await hash_password_async(body.password)
     user = User(org_id=scope.org_id, email=email, password_hash=password_hash, role=body.role)
     session.add(user)
     try:
@@ -105,18 +107,31 @@ async def patch_user(
     session: AsyncSession, scope: SiteScope, user_id: uuid.UUID, body: UserPatch
 ) -> UserOut:
     scope.require_role(SYSTEM_ADMIN)
+    new_hash = await hash_password_async(body.password) if body.password is not None else None
     user = await _get(session, scope, user_id)
     changed: dict[str, object] = {}
 
     if body.role is not None and body.role != user.role:
         if user.role == SYSTEM_ADMIN:
-            others = await session.scalar(
-                select(func.count())
-                .select_from(User)
-                .where(User.org_id == scope.org_id, User.role == SYSTEM_ADMIN, User.id != user.id)
-            )
-            if not others:
+            # Lock every admin row of the organisation: two admins demoting each other at the
+            # same moment must not both see "someone else is still an admin".
+            admins = (
+                await session.scalars(
+                    select(User.id)
+                    .where(User.org_id == scope.org_id, User.role == SYSTEM_ADMIN)
+                    .with_for_update()
+                )
+            ).all()
+            if not [a for a in admins if a != user.id]:
                 raise conflict("The last system admin cannot be demoted")
+            if body.site_ids is None:
+                # Demoting an admin without saying which sites they keep would leave an account
+                # that can see nothing.
+                raise ApiError(
+                    422,
+                    "site_ids is required when a system admin is demoted",
+                    code="validation_error",
+                )
         user.role = body.role
         changed["role"] = body.role
 
@@ -130,8 +145,8 @@ async def patch_user(
     elif body.role == "system_admin":
         await session.execute(delete(UserSite).where(UserSite.user_id == user.id))
 
-    if body.password is not None:
-        user.password_hash = await hash_password_async(body.password)
+    if new_hash is not None:
+        user.password_hash = new_hash
         changed["password"] = "changed"  # the fact, never the value
 
     audit(session, scope, "user.update", "user", user.id, changed)

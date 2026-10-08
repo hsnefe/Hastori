@@ -31,6 +31,15 @@ for i = 1, #rec, 2 do h[rec[i]] = rec[i + 1] end
 local now, grace = tonumber(ARGV[1]), tonumber(ARGV[2])
 local rt, fam = ARGV[5], ARGV[6]
 local fam_key = fam .. h['fid']
+-- A family has an absolute lifetime: refreshing does not extend it past born + max life.
+local born = tonumber(h['born'] or ARGV[1])
+local left = born + tonumber(ARGV[7]) - now
+if left <= 0 then
+  for _, m in ipairs(redis.call('SMEMBERS', fam_key)) do redis.call('DEL', rt .. m) end
+  redis.call('DEL', fam_key)
+  return {'missing'}
+end
+local ttl = math.min(tonumber(ARGV[4]), math.ceil(left))
 if h['used_at'] ~= '' then
   if now - tonumber(h['used_at']) > grace then
     for _, m in ipairs(redis.call('SMEMBERS', fam_key)) do redis.call('DEL', rt .. m) end
@@ -41,10 +50,10 @@ else
   redis.call('HSET', KEYS[1], 'used_at', ARGV[1])
 end
 local new_key = rt .. ARGV[3]
-redis.call('HSET', new_key, 'uid', h['uid'], 'fid', h['fid'], 'used_at', '')
-redis.call('EXPIRE', new_key, ARGV[4])
+redis.call('HSET', new_key, 'uid', h['uid'], 'fid', h['fid'], 'used_at', '', 'born', tostring(born))
+redis.call('EXPIRE', new_key, ttl)
 redis.call('SADD', fam_key, ARGV[3])
-redis.call('EXPIRE', fam_key, ARGV[4])
+redis.call('EXPIRE', fam_key, ttl)
 return {'ok', h['uid'], h['fid']}
 """
 
@@ -66,11 +75,13 @@ class RefreshStore:
         redis: Redis,
         ttl_s: int,
         grace_s: int,
+        max_life_s: int = 30 * 24 * 3600,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.redis = redis
         self.ttl_s = ttl_s
         self.grace_s = grace_s
+        self.max_life_s = max_life_s
         self.clock = clock
         self._rotate = redis.register_script(ROTATE_LUA)
 
@@ -84,7 +95,15 @@ class RefreshStore:
         token, family = secrets.token_urlsafe(32), uuid.uuid4().hex
         digest = self.digest(token)
         pipe = self.redis.pipeline(transaction=True)
-        pipe.hset(RT + digest, mapping={"uid": str(user_id), "fid": family, "used_at": ""})
+        pipe.hset(
+            RT + digest,
+            mapping={
+                "uid": str(user_id),
+                "fid": family,
+                "used_at": "",
+                "born": repr(self.clock()),
+            },
+        )
         pipe.expire(RT + digest, self.ttl_s)
         pipe.sadd(FAM + family, digest)
         pipe.expire(FAM + family, self.ttl_s)
@@ -102,6 +121,7 @@ class RefreshStore:
                 self.ttl_s,
                 RT,
                 FAM,
+                self.max_life_s,
             ],
         )
         result = [_text(x) for x in raw]

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from redis.exceptions import BusyLoadingError
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ResponseError as RedisResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -52,6 +53,10 @@ class ApiError(Exception):
         self.message = message
         self.code = code or _CODES.get(status, "error")
         self.headers = headers
+
+
+class HashQueueFull(Exception):
+    """Too many password hashes are already waiting; the caller should try again shortly."""
 
 
 def unauthorized(message: str = "Authentication required") -> ApiError:
@@ -124,6 +129,28 @@ def install_error_handlers(app: FastAPI) -> None:
             503, "unavailable", "A backing service is unavailable; try again shortly",
             headers={"Retry-After": "5"},
         )  # fmt: skip
+
+    @app.exception_handler(RedisResponseError)
+    async def redis_error(request: Request, exc: RedisResponseError) -> JSONResponse:
+        # `maxmemory` reached with noeviction: Redis refuses writes. That is "unavailable", not a
+        # bug in the request. Any other script/command error stays a 500 with its stack in the log.
+        if str(exc).startswith("OOM"):
+            log.error("redis out of memory", extra={"path": request.url.path})
+            return _response(
+                503, "unavailable", "A backing service is unavailable; try again shortly",
+                headers={"Retry-After": "5"},
+            )  # fmt: skip
+        log.error("unhandled error", exc_info=exc, extra={"path": request.url.path})
+        return _response(500, "internal_error", "Something went wrong")
+
+    @app.exception_handler(HashQueueFull)
+    async def busy(_: Request, __: HashQueueFull) -> JSONResponse:
+        return _response(
+            503,
+            "unavailable",
+            "Sign-in is busy; try again in a moment",
+            headers={"Retry-After": "2"},
+        )
 
     @app.exception_handler(Exception)
     async def unexpected(request: Request, exc: Exception) -> JSONResponse:

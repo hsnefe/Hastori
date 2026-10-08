@@ -228,7 +228,7 @@ def handle_client_message(hub: Hub, conn: Connection, text: str) -> None:
     try:
         message = json.loads(text)
         kind = message["type"]
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         conn.offer(server_message("error", code="bad_message", message="Expected a JSON object"))
         return
     if kind == "subscribe":

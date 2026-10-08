@@ -381,3 +381,41 @@ async def test_the_server_sends_heartbeats_and_closes_a_connection_at_its_maximu
         assert beats >= 3 and sock.close_code == CLOSE_MAX_AGE
     finally:
         settings.ws_heartbeat_s, settings.ws_max_age_s = 25.0, 900.0
+
+
+# -- WebSocket --------------------------------------------------------------------------------
+
+
+async def test_ticket_requests_are_rate_limited(live: ApiHarness) -> None:
+    live.app.state.settings.ws_tickets_per_minute = 3
+    c = await live.signed_in("izmir_viewer")
+    codes = [(await c.post("/ws-ticket")).status_code for _ in range(5)]
+    assert codes == [200, 200, 200, 429, 429]
+
+
+async def test_one_user_cannot_hold_unlimited_sockets(live: ApiHarness) -> None:
+    live.app.state.settings.ws_max_per_user = 2
+    first = await connect(live, "izmir_viewer")
+    second = await connect(live, "izmir_viewer")
+    third = await Socket(
+        live.app,
+        str((await (await live.signed_in("izmir_viewer")).post("/ws-ticket")).json()["ticket"]),
+        ORIGIN,
+    ).open()
+    assert third.accepted
+    assert await third.next() is None and third.close_code == 1013  # try again later
+    # a different user is unaffected, and a freed slot can be used again
+    other = await connect(live, "izmir_admin")
+    await first.leave()
+    again = await connect(live, "izmir_viewer")
+    for sock in (second, other, again):
+        await sock.leave()
+    assert live.app.state.ws_open == {}
+
+
+async def test_a_deeply_nested_message_gets_an_error_not_a_crash(live: ApiHarness) -> None:
+    sock = await connect(live, "izmir_viewer")
+    await sock.send("[" * 3000)
+    message = await sock.next()
+    assert message is not None and message["type"] == "error"
+    await sock.leave()

@@ -61,8 +61,8 @@ def create_app(
         version="0.2.0",
         description=DESCRIPTION,
         openapi_tags=TAGS,
-        docs_url="/api/v1/docs",
-        openapi_url="/api/v1/openapi.json",
+        docs_url="/api/v1/docs" if settings.api_docs else None,
+        openapi_url="/api/v1/openapi.json" if settings.api_docs else None,
         redoc_url=None,
         swagger_ui_parameters={"persistAuthorization": True},
         lifespan=lifespan,
@@ -72,9 +72,13 @@ def create_app(
     app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     app.state.redis = redis
     app.state.hub = Hub(redis)
+    app.state.ws_open = {}  # user id -> open sockets
     app.state.limiter = LoginLimiter(redis)
     app.state.refresh_store = RefreshStore(
-        redis, ttl_s=settings.refresh_token_ttl_s, grace_s=settings.refresh_grace_s
+        redis,
+        ttl_s=settings.refresh_token_ttl_s,
+        grace_s=settings.refresh_grace_s,
+        max_life_s=settings.refresh_max_life_s,
     )
     install_error_handlers(app)
 
