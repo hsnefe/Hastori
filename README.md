@@ -292,8 +292,8 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 - The refresh rotation script touches keys it builds itself: it needs a single Redis, not a
   Redis Cluster.
 - `GET /sites/{id}/consumption/daily` uses the 1-minute averages, so reactive energy of a minute
-  that is partly capacitive is slightly underestimated. It has not been `EXPLAIN`ed on a full
-  7 days of real TimescaleDB data.
+  that is partly capacitive is slightly underestimated. On 7 days of data
+  for two panels it runs in about 30 ms (`EXPLAIN (ANALYZE)`, chunks are excluded).
 - Timestamps are kept to millisecond resolution; the device clock is trusted within a window of
   65 minutes in the past (a replayed backlog) and 30 seconds in the future (otherwise the
   message is rejected). The device clock decides the timestamp: a drifting clock shifts a

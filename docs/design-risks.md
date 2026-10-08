@@ -6,7 +6,9 @@ yayın) için tasarım aşamasında bilinmesi gereken riskleri ve Gün 2'den **a
 toplar. Her madde bir "yapılacak"tır: ilgili günün başında gözden geçirilmeli, çözülünce buradan
 silinmeli. Gün 2'de kapanan maddeler (alarm süresinin saati, flapping, idempotans, yeniden
 başlatma, yetki sızıntısı, refresh rotation yarışı, Redis kalıcılığı, denetim kaydı, reaktif
-oranın günlük kümülatif sıçraması) silindi.
+oranın günlük kümülatif sıçraması) silindi. 2026-10-08'de canlı yığında (`make smoke`, `make e2e`,
+`make resilience`, alarm servisi için elle RabbitMQ/DB/kill denemeleri) doğrulandı; günlük kWh
+sorgusu 7 günlük veride 27 ms çıktı (G5 kapandı). Kalan fark: Testcontainers + CI (F4, F5, Gün 4).
 
 Kaynak notu: emsal projelerden alınan bilgiler (issue, post-mortem, blog) bir araştırma
 turunda toplandı ve tek tek elle doğrulanmadı; bağlantılar başlangıç noktasıdır. Mosquitto'da
@@ -21,11 +23,9 @@ değil, denemeyle doğrulanmalı.
 | G2 | **Kuyruk ve DLQ için uyarı yok.** `alarm.telemetry` derinliği ve `alarm.telemetry.dlq` büyümesi yalnızca RabbitMQ yönetim ekranında ve `alarm_rejected_total` sayacında görünür; eskiyen mesaj DLQ'ya gider ama kimseyi uyarmaz. | Gün 4 Prometheus: `alarm.telemetry` derinliği, DLQ derinliği, `alarm_eval_lag_seconds`, `ingest_outbox_depth` için uyarı kuralları (E3 ile birlikte). |
 | G3 | **Parola değişikliği refresh oturumlarını bitirmez.** Erişim belirteci her istekte veritabanından doğrulanır (rol, tesis, kullanıcı varlığı); refresh belirteci yalnızca Redis'e karşı. Parolası değişen ya da pasife alınan kullanıcının açık refresh oturumu 7 güne kadar yenilenebilir. | Kullanıcı başına belirteç sürümü (`users.token_version`, refresh kaydında saklanır) ya da Redis'te `user -> aileler` indeksi; parola değişince ve kullanıcı değişiminde aileleri iptal et. |
 | G4 | **Giriş sınırı adres döndüren saldırganı durdurmaz.** Sayaç e-posta + istemci adresi başına; bir hesaba farklı adreslerden denemeyi yalnızca gateway'in IP sınırı yavaşlatır. Caddy/Cloudflare arkasında `request.client` proxy'nin adresidir. | Gün 4: gateway'de gerçek IP başlığını (`CF-Connecting-IP`, `X-Forwarded-For`) yapılandır ve API'de yalnızca güvenilen proxy'den kabul et; login için gateway'de ayrı sıkı limit (E2). Hesap başına ikinci, daha yüksek eşik düşünülebilir (kilitlenme riskiyle). |
-| G5 | **Günlük kWh sorgusu gerçek TimescaleDB'de ölçülmedi.** `measurements_1m` (cagg) üzerinde `unnest` ile gün aralıklarına birleştirme yazıldı; testler düz PostgreSQL'de (görünüm) koştu. Gerçek cagg'de plan (chunk eleme, gerçek zamanlı birleşim) farklı olabilir. | Gün 3 başında 7 günlük gerçek veriyle `EXPLAIN (ANALYZE)`; yavaşsa saatlik cagg'den topla (D1/D2 ile birlikte). |
 | G6 | **Reaktif oran dakikalık ortalamadan.** Günlük reaktif enerji `greatest(avg_value, 0)` ile dakikalık ortalamadan hesaplanır; kısmen kapasitif bir dakika inductive enerjiyi az gösterir. Uyarı kuralı (alarm servisi) ham örnekle çalışır ve bundan etkilenmez. | Gösterim için kabul edilebilir; hassasiyet gerekirse ham veriden ya da ayrı bir `reactive_pos` cagg'inden hesapla. |
 | G7 | **Alarm servisi tek işlemde.** Tek aktif tüketici ve bellekte durum: demo yükünde (~3,5 mesaj/sn) sorun yok; yatay ölçek için cihaz başına bölme gerekir. Yedek kopya `x-single-active-consumer` ile bekler, devralınca açılışta DB'den yeniden oynatır. | README'de "Known limits". Ölçek gerekirse cihaz kimliğine göre tutarlı karma ile ayrı kuyruklar. |
 | G8 | **Alarm olayları (Redis) outbox'sız.** Alarm DB'ye yazıldıktan sonra Redis'e `PUBLISH` edilir; Redis kapalıysa olay kaybolur (sayaç artar, alarm yerinde). Canlı ekran bir sonraki REST okumasında düzelir. | WebSocket'te yeniden bağlanınca REST anlık görüntüsü (C3). Garanti istenirse alarm olaylarını da outbox'tan geçir. |
-| G9 | **Testler gerçek yığının tamamında koşmadı.** Birim ve entegrasyon testleri gerçek PostgreSQL (TimescaleDB'siz) ve Lua'lı Redis'e karşı koşar; TimescaleDB, RabbitMQ, Mosquitto ve konteynerler yalnızca `make smoke`, `make resilience`, `make e2e` ile sınanır. | `make e2e` temiz bir yığında bir kez çalıştırılmalı; Gün 4'te Testcontainers + CI (F4, F5). |
 
 ## 2. WebSocket ve canlı yayın (Gün 3)
 
@@ -42,7 +42,7 @@ değil, denemeyle doğrulanmalı.
 | # | Risk | Karar / önlem |
 |---|------|---------------|
 | D1 | **Retention ile cagg çakışması.** `refresh_continuous_aggregate('measurements_1m', NULL, NULL)` ya da 7 günden uzun `start_offset`, cagg'i ham veriyle birlikte siler. | README ve 0002'de uyarı var. Saatlik/günlük cagg'ler için ayrı refresh politikası; günlük cagg'i saatlik cagg'den türet (hierarchical). |
-| D2 | **Yerel saatle günlük toplam** büyük aralıkta plan sorunları çıkarabilir (tüm chunk'ları tarar). | G5'teki `EXPLAIN`; gerekirse saatlik cagg'den topla. |
+| D2 | **Yerel saatle günlük toplam** büyük aralıkta plan sorunları çıkarabilir (tüm chunk'ları tarar). | `EXPLAIN` ölçüldü (7 gün, 2 pano: 27 ms, chunk elemesi çalışıyor); yalnızca çok daha fazla tesiste yeniden bak. |
 | D3 | **Sıkıştırma açılırsa** `uq_measurements` + `ON CONFLICT DO NOTHING` sıkıştırılmış chunk'larda yavaşlar. | `compress_segmentby='device_id,metric'`; eski chunk'ta tekilleştirme testi. Şu an kapalı. |
 | D4 | **Real-time cagg** (`materialized_only=false`) her sorguda son dakikaları ham tablodan hesaplar. | Dashboard sorgu sayısı artınca ölçülmeli. |
 
