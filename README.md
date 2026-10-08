@@ -36,7 +36,7 @@ Windows (`winget install ezwinports.make`); PowerShell equivalents are below.
 
 ```bash
 git clone <repo-url> hastori && cd hastori
-make up          # .env with random secrets, TLS certs, MQTT users/ACL, then timescaledb + mosquitto + rabbitmq + redis + migrate + ingestion + alarm + api
+make up          # .env with random secrets, TLS certs, MQTT users/ACL, then timescaledb + mosquitto + rabbitmq + redis + migrate + ingestion + alarm + api + web + caddy (http://127.0.0.1:8080)
 make seed        # demo org, 2 sites, 7 devices, 5 users, 4 alarm rules (idempotent)
 make simulate    # start the field simulator
 make smoke       # automated day-1 checks
@@ -93,6 +93,7 @@ capabilities and a memory limit.
 | `make resilience`| `uv run python scripts/resilience.py` (about 30 minutes; `--quick` skips the 6 minute ingestion outage, `--alarm-only` runs just the alarm service drills) |
 | `make e2e`       | `uv run python scripts/e2e.py` (about 25 minutes; `--skip-reactive`, `--skip-restart`) |
 | `make web-install`, `make web-dev` | `cd web; npm ci` once, then `npm run dev` (dashboard on `http://127.0.0.1:3000`, `/api` is forwarded to the API on 8000, the WebSocket goes to 8000 directly) |
+| `make web-check` | `cd web; npm run typecheck; npm run lint; npm test` |
 | `make reset-alarm-queue` | `uv run python scripts/reset_alarm_queue.py` (then `docker compose restart ingestion alarm`) |
 | `make test`      | `uv run pytest` |
 | `make lint`      | `uv run ruff check .; uv run ruff format --check .; uv run mypy packages services scripts tests conftest.py` |
@@ -120,8 +121,8 @@ seen; use `make smoke-quick` whenever alarms are being tested. `compensation_fai
 | MQTT (TLS only) | `127.0.0.1:8883` (CA: `infra/mosquitto/certs/ca.crt`) |
 
 The ingestion and alarm endpoints have no authentication; they only expose counters and
-readiness. Do not widen the `127.0.0.1` port bindings without putting the gateway (day 4) in
-front.
+readiness. Do not widen the `127.0.0.1` port bindings: put Caddy (8080) in front and, for the
+internet, a tunnel (see "Putting it on the internet" under Known limits).
 
 ### The API
 
@@ -225,7 +226,9 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
   and the WebSocket) to the API and everything else to the Next.js server, so the refresh cookie
   (`SameSite=Strict`, `Path=/api/v1/auth`) is first-party and the socket needs no CORS. With
   `make web-dev` the same job is done by a Next.js rewrite. Caddy's access log drops the
-  WebSocket ticket from the query string. TLS, rate limits and the real client address are day 4.
+  WebSocket ticket from the query string (errors too). Caddy hands the API the real client address
+  (`CF-Connecting-IP` / `X-Forwarded-For` from private proxy ranges; the API believes it only
+  from `TRUSTED_PROXIES`). TLS and rate limits are day 4.
 - **Why Next.js, and how little of it is used.** It is the stack of the brief. Used: the App Router for layouts
   and the dynamic `/sites/[siteId]` routes, a server-rendered page skeleton, the standalone
   output for a small image, and `proxy.ts` for a per-request CSP nonce. Not used: Server Actions
@@ -343,7 +346,7 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
 
 `make test` needs no Docker: it starts a real PostgreSQL (the `pgserver` package) and a Redis that
 runs Lua (`fakeredis`), builds the schema with the real migrations and runs the services against
-them: about 280 Python tests (plus 40 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
+them: about 330 Python tests (plus 65 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
 virtual time including a restart after every possible sample; the authorization matrix; refresh
 token rotation under parallel requests). What this cannot show is TimescaleDB itself (migration
 `0002` is replaced by a plain table and view with the same columns), RabbitMQ, the MQTT broker and
@@ -352,8 +355,9 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 ## Known limits
 
 - **One main meter per site.** The daily kWh sums the site's main panel (the energy analyzer). A
-  site with two panels in series would be counted twice; the demo sites have one. When a second
-  panel arrives, `sites.main_meter_device_id` is the way to say which one counts.
+  site with two panels in series would be counted twice; the demo sites have one. There is no
+  column to say which panel counts yet (it would be a new migration). Only active panels are
+  summed and counted for `coverage`, so deactivating a panel also hides its past days.
 - **A device clock set back (B3).** A sample 60 s or more behind the device's newest one restarts
   that device's sequence (`alarm_clock_jumps_total`), so the alarm keeps working. Right after the
   alarm service starts, a jump deeper than the start-up replay window (15 minutes) looks like a
@@ -368,9 +372,24 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
   `online: false` in the device list and an offline badge on its card. A pending count that would
   span a silence restarts.
 - A password change does not end the user's refresh sessions (the access token is checked against
-  the database on every request, the refresh token only against Redis).
-- The login limiter counts per e-mail address and client address; an attacker who rotates
-  addresses is only stopped by the gateway's limit (day 4).
+  the database on every request, the refresh token only against Redis). A refresh session ends
+  at the latest 30 days after the sign-in (`REFRESH_MAX_LIFE_S`), however often it is renewed.
+- The login limiter counts failures per e-mail address and client address (5 in 5 minutes) and
+  per client address alone (30); an attacker with many addresses is only slowed by that. Stock
+  Caddy has no rate limiter (it needs an `xcaddy` build with `caddy-ratelimit`), so day 4 adds
+  one in front. At most 16 password hashes wait at a time, the rest of the sign-ins get a quick
+  503 instead of queueing behind them.
+- WebSockets: 5 per user, 500 in all, 30 tickets a minute per user (`WS_MAX_PER_USER`,
+  `WS_MAX_TOTAL`, `WS_TICKETS_PER_MINUTE`). uvicorn reads at most 8 KiB per client message.
+- **Putting it on the internet:** `make env-public` (random demo passwords, Swagger off), a
+  tunnel in front of Caddy and nothing else published. A direct visitor of `127.0.0.1:8080` is a
+  "private" peer to Caddy and could claim any client address; behind a tunnel that is not
+  reachable. Switch `COOKIE_SECURE=true` once there is HTTPS.
+- A second alarm replica waits as a standby (single active consumer). Before its first message
+  after two minutes without one it rebuilds its engine from the database, so it takes over with
+  the alarms the other replica opened. After a failed write the active one rebuilds too.
+- A rule whose reactive window holds under 2 kWh has no ratio: an open reactive alarm stays open
+  until the window fills again (no data is not recovery). The database caps `duration_s` at 600 s.
 - The refresh rotation script touches keys it builds itself: it needs a single Redis, not a
   Redis Cluster.
 - `GET /sites/{id}/consumption/daily` uses the 1-minute averages, so reactive energy of a minute
@@ -398,7 +417,8 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 - `docs/design-risks.md` lists the risks of what is *not built yet* (gateway hardening, CI,
   public hosting) and what is still open of the rest.
 - Mosquitto TLS uses a local demo CA (`make certs`); not for production. The CA key is kept in
-  `infra/mosquitto/certs/` (git-ignored) so the server certificate can be renewed.
+  `infra/mosquitto/ca-private/` (git-ignored, not mounted into any container) so the server
+  certificate can be renewed.
 - The simulator keeps its state in memory; a restart starts every temperature from its normal
   value.
 
@@ -413,3 +433,6 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
 - Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
   them at once; the access token's lifetime is the only window left.
 - Grafana, TLS and rate limits in Caddy, and CI are deliberately deferred to day 4.
+- Alarm name, severity and metric are read from the rule when an alarm is shown, so editing a
+  rule renames its past alarms (the thresholds an alarm opened with are stored). Snapshot
+  columns on `alarms` would fix it.
