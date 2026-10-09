@@ -1,4 +1,4 @@
-.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test test-integration lint lint-migrations web-install web-dev web-check
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset backfill simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test test-integration lint lint-migrations web-install web-dev web-check
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
@@ -36,6 +36,10 @@ seed:
 # Demo reset: YAML wins again (user passwords, alarm rules)
 seed-reset:
 	uv run python scripts/seed.py --reset
+
+# Synthetic history for the demo (the simulator's own model, 1-minute readings, 1..7 days)
+backfill:
+	uv run python scripts/backfill.py --days $(or $(DAYS),7)
 
 simulate:
 	docker compose --profile sim up -d --build simulator
