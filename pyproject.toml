@@ -22,6 +22,7 @@ dev = [
   # integration tests without Docker: a real PostgreSQL and a Redis with Lua
   "pgserver>=0.1.4",
   "fakeredis[lua]>=2.26",
+  "testcontainers>=4.8",
 ]
 
 [tool.uv.workspace]
@@ -55,12 +56,15 @@ explicit_package_bases = true
 mypy_path = "packages/common/src:services/ingestion/src:services/simulator/src:services/alarm/src:services/api/src:scripts"
 
 [[tool.mypy.overrides]]
-module = ["aiomqtt.*", "aio_pika.*", "pwdlib.*", "asyncpg.*"]
+module = ["aiomqtt.*", "aio_pika.*", "pwdlib.*", "asyncpg.*", "docker.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages", "services", "tests"]
+# Testcontainers tests need Docker: `make test-integration` (pytest -m integration)
+addopts = ["-m", "not integration"]
+markers = ["integration: real TimescaleDB and RabbitMQ in containers (needs Docker)"]
 
 [tool.ruff.lint.isort]
 known-first-party = [

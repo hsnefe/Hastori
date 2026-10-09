@@ -1,4 +1,4 @@
-.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint lint-migrations web-install web-dev web-check
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test test-integration lint lint-migrations web-install web-dev web-check
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
@@ -67,6 +67,10 @@ e2e:
 
 test:
 	uv run pytest
+
+# Real TimescaleDB and RabbitMQ in throwaway containers (Testcontainers; needs Docker, ~30 s)
+test-integration:
+	uv run pytest -m integration tests/integration
 
 lint:
 	uv run ruff check .
