@@ -111,7 +111,9 @@ seen; use `make smoke-quick` whenever alarms are being tested. `compensation_fai
 | Service | URL |
 |---------|-----|
 | **Dashboard** (Caddy: pages, REST and WebSocket on one origin) | `http://127.0.0.1:8080` |
-| REST API, Swagger | `http://127.0.0.1:8000/api/v1`, `/api/v1/docs`, `/api/v1/openapi.json`; `/healthz`, `/readyz` |
+| REST API, Swagger | `http://127.0.0.1:8000/api/v1`, `/api/v1/docs`, `/api/v1/openapi.json`; `/healthz`, `/readyz`, `/metrics` |
+| **Grafana** (dashboard "Hastori pipeline") | `http://127.0.0.1:3001` (user `admin`, `GRAFANA_ADMIN_PASSWORD` in `.env`) |
+| Prometheus (targets, alert rules) | `http://127.0.0.1:9090` (`/targets`, `/alerts`) |
 | Alarm service health / readiness / metrics | `http://127.0.0.1:8003/healthz`, `/readyz`, `/metrics` |
 | Ingestion health / readiness / metrics | `http://127.0.0.1:8001/healthz`, `/readyz`, `/metrics` |
 | Simulator fault control | `http://127.0.0.1:8002/faults` (`Authorization: Bearer $SIM_CONTROL_TOKEN`) |
@@ -120,8 +122,9 @@ seen; use `make smoke-quick` whenever alarms are being tested. `compensation_fai
 | Redis | `127.0.0.1:6379` (password in `.env`) |
 | MQTT (TLS only) | `127.0.0.1:8883` (CA: `infra/mosquitto/certs/ca.crt`) |
 
-The ingestion and alarm endpoints have no authentication; they only expose counters and
-readiness. Do not widen the `127.0.0.1` port bindings: put Caddy (8080) in front and, for the
+The ingestion and alarm endpoints, `/metrics` of the API and Prometheus have no authentication;
+they only expose counters and readiness. Grafana and Prometheus see every site: they are never
+routed through Caddy, reach them over SSH on a remote machine. Do not widen the `127.0.0.1` port bindings: put Caddy (8080) in front and, for the
 internet, a tunnel (see "Putting it on the internet" under Known limits).
 
 ### The API
@@ -208,6 +211,25 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
 - **Seed**: by default it never overwrites what people changed (users' e-mail, role and
   password hash, a site's name, city and time zone, a device's name and active flag, alarm rules);
   `make seed-reset` does.
+
+### Observability (day 4)
+
+- Prometheus scrapes ingestion, the alarm service, the API and RabbitMQ (its `rabbitmq_prometheus`
+  plugin; per-queue depths from `/metrics/detailed`) every 15 s and keeps 7 days (at most 1 GB).
+- The API exports `api_requests_total{method,route,status}`, `api_request_duration_seconds` and
+  `api_ws_connections`. `route` is the template (`/api/v1/sites/{site_id}/devices`), never an id;
+  probes and the scrape itself are not counted.
+- Alert rules (`infra/prometheus/alerts.yml`): a service down, the whole fleet silent (the case
+  `no_data` cannot see, risk G16), a backlog on `alarm.telemetry`, a growing dead-letter queue or
+  rejected messages, evaluation lag over 10 s, an outbox backlog, ingestion rejecting, MQTT
+  reconnect churn, API 5xx. There is no notification channel: firing alerts show in Prometheus and
+  on the Grafana dashboard.
+- Grafana is provisioned from `infra/grafana` (data source and the "Hastori pipeline" dashboard:
+  flow, lag, open alarms, queues, API traffic and latency, WebSockets, firing alerts); anonymous
+  access and sign-up are off.
+- Request ids: Caddy makes one per request (never taken from the client), sends it to the API as
+  `X-Request-ID`, writes it into its access log as `request_id` and returns it to the browser. The
+  API logs every line of that request with the same `request_id` and echoes it, also on a 500.
 
 ### Dashboard (day 3)
 
@@ -448,7 +470,8 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
   through an outbox like the telemetry, so a Redis outage cannot hide an alarm from live screens.
 - Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
   them at once; the access token's lifetime is the only window left.
-- Grafana, TLS and rate limits in Caddy, and CI are deliberately deferred to day 4.
+- TLS and rate limits in Caddy, and CI are deliberately deferred to day 4.
+- Alertmanager with a real notification channel (e-mail, chat) for the Prometheus alerts.
 - Alarm name, severity and metric are read from the rule when an alarm is shown, so editing a
   rule renames its past alarms (the thresholds an alarm opened with are stored). Snapshot
   columns on `alarms` would fix it.

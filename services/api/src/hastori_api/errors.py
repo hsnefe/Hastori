@@ -15,6 +15,8 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from hastori_common.logging import request_id
+
 log = logging.getLogger("api")
 
 _CODES = {
@@ -88,6 +90,15 @@ def _response(
     )
 
 
+def _internal_error() -> JSONResponse:
+    # Served outside the request-id middleware (Starlette answers it last): echo the id here so a
+    # user can quote it and it matches the logged stack.
+    rid = request_id.get()
+    return _response(
+        500, "internal_error", "Something went wrong", {"X-Request-ID": rid} if rid else None
+    )
+
+
 # What every endpoint can answer besides its own success; shown in Swagger.
 COMMON_ERRORS: dict[int | str, dict[str, Any]] = {
     401: {"model": ErrorResponse, "description": "Missing, expired or invalid access token"},
@@ -141,7 +152,7 @@ def install_error_handlers(app: FastAPI) -> None:
                 headers={"Retry-After": "5"},
             )  # fmt: skip
         log.error("unhandled error", exc_info=exc, extra={"path": request.url.path})
-        return _response(500, "internal_error", "Something went wrong")
+        return _internal_error()
 
     @app.exception_handler(HashQueueFull)
     async def busy(_: Request, __: HashQueueFull) -> JSONResponse:
@@ -156,4 +167,4 @@ def install_error_handlers(app: FastAPI) -> None:
     async def unexpected(request: Request, exc: Exception) -> JSONResponse:
         # Never leak internals; the log has the stack.
         log.error("unhandled error", exc_info=exc, extra={"path": request.url.path})
-        return _response(500, "internal_error", "Something went wrong")
+        return _internal_error()

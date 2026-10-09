@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from types import ModuleType
 
-from hastori_common.messaging import ALARM_QUEUE_ARGS, DLQ_ARGS, DLX
+from hastori_common.messaging import ALARM_QUEUE, ALARM_QUEUE_ARGS, DLQ, DLQ_ARGS, DLX
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,3 +85,28 @@ def test_caddy_passes_the_resolved_client_address_to_the_api() -> None:
     assert "client_ip_headers CF-Connecting-IP X-Forwarded-For" in caddyfile
     assert "header_up X-Forwarded-For {client_ip}" in caddyfile
     assert caddyfile.count("delete ticket") == 2  # default and access log both redact it
+
+
+def test_caddy_makes_the_request_id_and_never_takes_the_clients() -> None:
+    caddyfile = (ROOT / "infra" / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "header_up X-Request-ID {http.request.uuid}" in caddyfile
+    assert "header >X-Request-ID {http.request.uuid}" in caddyfile  # deferred: replaces the API's
+    assert "log_append request_id {http.request.uuid}" in caddyfile
+
+
+def test_alert_rules_watch_the_queues_that_exist() -> None:
+    import yaml
+
+    rules = yaml.safe_load((ROOT / "infra" / "prometheus" / "alerts.yml").read_text("utf-8"))
+    exprs = " ".join(r["expr"] for g in rules["groups"] for r in g["rules"])
+    assert f'queue="{ALARM_QUEUE}"' in exprs
+    assert f'queue="{DLQ}"' in exprs
+
+
+def test_grafana_needs_a_password_from_env() -> None:
+    import yaml
+
+    services = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    env = services["grafana"]["environment"]
+    assert env["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
+    assert env["GF_SECURITY_ADMIN_PASSWORD"] == "${GRAFANA_ADMIN_PASSWORD}"

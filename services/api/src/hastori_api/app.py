@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from hastori_api.errors import install_error_handlers
 from hastori_api.live import Hub
+from hastori_api.observability import ApiMetrics, ObservabilityMiddleware
+from hastori_api.observability import router as metrics_router
 from hastori_api.ratelimit import LoginLimiter
 from hastori_api.routers import alarm_rules, alarms, auth, devices, health, live, sites, users
 from hastori_api.tokens import RefreshStore
@@ -73,6 +75,7 @@ def create_app(
     app.state.redis = redis
     app.state.hub = Hub(redis)
     app.state.ws_open = {}  # user id -> open sockets
+    app.state.metrics = ApiMetrics(lambda: sum(app.state.ws_open.values()))
     app.state.limiter = LoginLimiter(redis)
     app.state.refresh_store = RefreshStore(
         redis,
@@ -81,6 +84,7 @@ def create_app(
         max_life_s=settings.refresh_max_life_s,
     )
     install_error_handlers(app)
+    app.add_middleware(ObservabilityMiddleware, metrics=app.state.metrics)
 
     v1 = APIRouter(prefix="/api/v1")
     for router in (
@@ -95,4 +99,5 @@ def create_app(
         v1.include_router(router)
     app.include_router(v1)
     app.include_router(health.router)
+    app.include_router(metrics_router)
     return app

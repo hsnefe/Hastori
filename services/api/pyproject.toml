@@ -9,6 +9,7 @@ dependencies = [
   "websockets>=14",
   "pyjwt>=2.9",
   "redis>=5.2",
+  "prometheus-client>=0.20",
   "tzdata",
 ]
 

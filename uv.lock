@@ -436,6 +436,7 @@ source = { editable = "services/api" }
 dependencies = [
     { name = "fastapi" },
     { name = "hastori-common" },
+    { name = "prometheus-client" },
     { name = "pyjwt" },
     { name = "redis" },
     { name = "tzdata" },
@@ -447,6 +448,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "hastori-common", editable = "packages/common" },
+    { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pyjwt", specifier = ">=2.9" },
     { name = "redis", specifier = ">=5.2" },
     { name = "tzdata" },

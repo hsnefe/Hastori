@@ -45,6 +45,11 @@
 		-Server
 	}
 
+	# One id per request, made here and never taken from the client: the API logs with it and
+	# echoes it, the access log records it and the browser sees it, so a report can be traced.
+	header >X-Request-ID {http.request.uuid}
+	log_append request_id {http.request.uuid}
+
 	# The access log may carry neither the WebSocket ticket (it is in the query string) nor
 	# credentials. Caddy already replaces Authorization and Cookie headers; the ticket is ours.
 	log {
@@ -62,6 +67,7 @@
 			# Caddy resolves the real client (CF-Connecting-IP, X-Forwarded-For from a trusted
 			# proxy); by default it would only append its own peer to whatever header came in.
 			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {http.request.uuid}
 		}
 	}
 
