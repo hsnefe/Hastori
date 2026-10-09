@@ -273,8 +273,14 @@ Decision records: [TimescaleDB over InfluxDB](docs/adr/0001-timescaledb-over-inf
 |---|---|
 | ![Open alarm and history](docs/img/alarms-admin.jpg) | ![Detail with the thresholds it opened with](docs/img/alarm-detail.jpg) |
 
+| New alarm rule (site admin) | Grafana "Hastori pipeline" (day 4) |
+|---|---|
+| ![The new rule form](docs/img/rules-new.jpg) | ![Flow, lag, open alarms, queues, API](docs/img/grafana-pipeline.jpg) |
+
 Screenshots are of the packaged stack on `http://127.0.0.1:8080` at a narrow window, so the layout
 is the single-column one; on a wide screen the chart, the daily energy and the open alarms sit side by side.
+The 7-day energy bars come from `make backfill` (synthetic, see "Demo data and demo sign-in"); the
+Grafana capture is of the stack after the end-to-end run, so it shows alarms and a dead-letter spike.
 
 - **One origin.** In the packaged stack Caddy listens on `127.0.0.1:8080` and sends `/api/*` (REST
   and the WebSocket) to the API and everything else to the Next.js server, so the refresh cookie
