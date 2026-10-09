@@ -3,7 +3,7 @@ name: hastori
 # Images are pinned to exact versions: a floating tag can change broker behaviour under you.
 services:
   timescaledb:
-    image: timescale/timescaledb:2.17.2-pg17
+    image: timescale/timescaledb:2.17.2-pg17@sha256:3324f81ca7f84cdc2dc4497863b3798ababa8ce130c5b59d73f0b40e3a34148e
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
 
   mosquitto:
-    image: eclipse-mosquitto:2.1.2-alpine
+    image: eclipse-mosquitto:2.1.2-alpine@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
     environment:
       MQTT_HEALTH_USER: ${MQTT_HEALTH_USER}
     ports:
@@ -52,7 +52,7 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:4.3.6-management
+    image: rabbitmq:4.3.6-management@sha256:8dd6e3570ddaa2ef82a6c3a8950e79c1f73893adfbdddbc374fc1f1ac8a0f5dd
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7.4.11-alpine
+    image: redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     # The password is read from a compose secret, not an environment variable (`docker inspect`
     # shows those). `user:` makes the image entrypoint skip its chown + privilege drop, which
     # would need capabilities this container does not have.
@@ -257,14 +257,17 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2.11.4-alpine
+    # Built from infra/caddy/Dockerfile: stock Caddy plus mholt/caddy-ratelimit.
+    build: ./infra/caddy
+    image: hastori-caddy:local
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    # The caddy binary carries the file capability cap_net_bind_service; with every capability
-    # dropped the kernel refuses to exec it. It listens on 8080 and never binds a low port.
-    cap_add: [NET_BIND_SERVICE]
+    # The rebuilt binary has no file capability and listens on 8080 only: no capability needed.
     read_only: true
     tmpfs: [/data, /config, /tmp]
+    environment:
+      # Host names the gateway answers to; any other Host header gets 421.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-127.0.0.1 localhost}
     mem_limit: 128m
     ports:
       - "127.0.0.1:8080:8080"
@@ -320,7 +323,7 @@ services:
   # data of every site (risk E1). On a remote machine, reach them through an SSH tunnel:
   # ssh -L 3001:127.0.0.1:3001 -L 9090:127.0.0.1:9090 <host>, then http://127.0.0.1:3001
   prometheus:
-    image: prom/prometheus:v3.5.0
+    image: prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -344,7 +347,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:12.1.1
+    image: grafana/grafana:12.1.1@sha256:a1701c2180249361737a99a01bc770db39381640e4d631825d38ff4535efa47d
     environment:
       # Applied when the Grafana database is created (first start of the volume).
       GF_SECURITY_ADMIN_USER: admin

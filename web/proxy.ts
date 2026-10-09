@@ -8,6 +8,8 @@ export function proxy(request: NextRequest) {
 
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const host = request.headers.get("host") ?? "";
+  // Behind the HTTPS tunnel the gateway forwards the original scheme: then only wss may open.
+  const https = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https";
   const csp = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
@@ -16,7 +18,7 @@ export function proxy(request: NextRequest) {
     "img-src 'self' data:",
     "font-src 'self'",
     // The page's own origin for REST, and its WebSocket (older browsers do not read 'self' as ws).
-    `connect-src 'self' ws://${host} wss://${host}`,
+    https ? `connect-src 'self' wss://${host}` : `connect-src 'self' ws://${host} wss://${host}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

@@ -2,21 +2,23 @@
 #   /api/*  (REST and the WebSocket at /api/v1/ws)  ->  the API
 #   everything else                                 ->  the Next.js server
 # One origin: the browser's refresh cookie (SameSite=Strict, Path=/api/v1/auth) is first-party and
-# the WebSocket needs no CORS. TLS, rate limits and COOKIE_SECURE come in the same file on day 4,
-# when this listens on a public address (stock Caddy has no rate limiter: that needs an xcaddy
-# build with mholt/caddy-ratelimit; until then the API limits sign-in by e-mail and address).
+# the WebSocket needs no CORS. TLS is terminated in front (a tunnel); this listens on plain HTTP
+# and trusts what a private-range peer says about the client. Stock Caddy has no rate limiter:
+# the image is built with mholt/caddy-ratelimit (infra/caddy/Dockerfile).
 
 {
 	admin off
 	auto_https off
 	# Wait for open connections (WebSockets) this long on a reload or stop; the clients reconnect.
 	grace_period 10s
+	order rate_limit before reverse_proxy
 
-	# The real client address, for the API's sign-in limiter. Private ranges are trusted proxies
-	# (cloudflared on this host or network, another Caddy); the client is taken from
-	# CF-Connecting-IP (Cloudflare Tunnel) or else X-Forwarded-For. A browser that talks to
-	# 127.0.0.1:8080 directly is a "private" peer too and could therefore claim any address: fine
-	# on a developer machine, not an exposed port (put the tunnel in front, publish nothing else).
+	# The real client address, for the rate limits and the API's sign-in limiter. Private ranges
+	# are trusted proxies (cloudflared or tailscaled on this host or network, another Caddy); the
+	# client is taken from CF-Connecting-IP (Cloudflare Tunnel) or else X-Forwarded-For. A browser
+	# that talks to 127.0.0.1:8080 directly is a "private" peer too and could therefore claim any
+	# address: fine on a developer machine, not an exposed port (put the tunnel in front, publish
+	# nothing else).
 	servers {
 		trusted_proxies static private_ranges
 		client_ip_headers CF-Connecting-IP X-Forwarded-For
@@ -37,6 +39,15 @@
 :8080 {
 	encode zstd gzip
 
+	# Only the names this site is served under (ALLOWED_HOSTS, space separated); a forged Host
+	# header cannot steer links, cache keys or the CSP's WebSocket source.
+	@badhost not host {$ALLOWED_HOSTS:127.0.0.1 localhost}
+	handle @badhost {
+		respond "Misdirected request" 421 {
+			close
+		}
+	}
+
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
@@ -44,6 +55,11 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 		-Server
 	}
+
+	# HSTS only when the request reached the tunnel over HTTPS (the tunnel says so; a plain
+	# http://127.0.0.1:8080 session must not pin the browser to HTTPS on localhost).
+	@https header X-Forwarded-Proto https
+	header @https Strict-Transport-Security "max-age=31536000"
 
 	# One id per request, made here and never taken from the client: the API logs with it and
 	# echoes it, the access log records it and the browser sees it, so a report can be traced.
@@ -62,12 +78,41 @@
 		}
 	}
 
+	# Nothing here takes a large upload: a request body over 1 MB is refused with 413.
+	request_body {
+		max_size 1MB
+	}
+
 	handle /api/* {
+		# Answers carry sessions, readings and alarms: no shared or browser cache keeps them.
+		header Cache-Control "no-store"
+
+		# Sign-in (also the demo one) and token refresh: strict, per client address (guessing and stuffing). The rest
+		# of the API: loose, enough for a dashboard and a few scripts (the WebSocket is one request).
+		rate_limit {
+			zone auth {
+				match {
+					path /api/v1/auth/login /api/v1/auth/refresh /api/v1/auth/demo
+				}
+				key {client_ip}
+				events 10
+				window 1m
+			}
+			zone api {
+				key {client_ip}
+				events 300
+				window 1m
+			}
+		}
+
 		reverse_proxy api:8000 {
 			# Caddy resolves the real client (CF-Connecting-IP, X-Forwarded-For from a trusted
 			# proxy); by default it would only append its own peer to whatever header came in.
 			header_up X-Forwarded-For {client_ip}
 			header_up X-Request-ID {http.request.uuid}
+			# A reload or restart keeps WebSockets open this long before cutting them; the
+			# clients reconnect on their own.
+			stream_close_delay 1m
 		}
 	}
 

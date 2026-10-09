@@ -1,7 +1,7 @@
 # Next.js standalone image: dependencies and the build in one stage, only the traced server and the
 # static files in the one that runs. Not exposed to the host: Caddy is the single entry.
 
-FROM node:24.15.0-alpine3.22 AS build
+FROM node:24.15.0-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json ./
@@ -13,7 +13,7 @@ ARG API_ORIGIN=http://api:8000
 ENV API_ORIGIN=$API_ORIGIN
 RUN npm run build
 
-FROM node:24.15.0-alpine3.22
+FROM node:24.15.0-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0 PORT=3000
 # Unprivileged: nothing in here needs root at run time.

@@ -250,7 +250,14 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
   `make web-dev` the same job is done by a Next.js rewrite. Caddy's access log drops the
   WebSocket ticket from the query string (errors too). Caddy hands the API the real client address
   (`CF-Connecting-IP` / `X-Forwarded-For` from private proxy ranges; the API believes it only
-  from `TRUSTED_PROXIES`). TLS and rate limits are day 4.
+  from `TRUSTED_PROXIES`).
+- **What the gateway does** (`infra/caddy`, an image built with `xcaddy` and `mholt/caddy-ratelimit`):
+  10 requests a minute per client address for sign-in and token refresh, 300 for the rest of
+  `/api` (429 with `Retry-After`); a request body over 1 MB is refused (413); a `Host` that is not
+  in `ALLOWED_HOSTS` gets 421; `/api` answers carry `Cache-Control: no-store`; `Strict-Transport-Security`
+  is sent when the tunnel says the request came over HTTPS (`X-Forwarded-Proto`), and then the CSP lets
+  the page open `wss:` only; open WebSockets get a minute to finish on a reload. TLS itself ends
+  at the tunnel in front. The base images are pinned by digest.
 - **Why Next.js, and how little of it is used.** It is the stack of the brief. Used: the App Router for layouts
   and the dynamic `/sites/[siteId]` routes, a server-rendered page skeleton, the standalone
   output for a small image, and `proxy.ts` for a per-request CSP nonce. Not used: Server Actions
@@ -426,9 +433,8 @@ actions are pinned to commit SHAs.
   the database on every request, the refresh token only against Redis). A refresh session ends
   at the latest 30 days after the sign-in (`REFRESH_MAX_LIFE_S`), however often it is renewed.
 - The login limiter counts failures per e-mail address and client address (5 in 5 minutes) and
-  per client address alone (30); an attacker with many addresses is only slowed by that. Stock
-  Caddy has no rate limiter (it needs an `xcaddy` build with `caddy-ratelimit`), so day 4 adds
-  one in front. At most 16 password hashes wait at a time, the rest of the sign-ins get a quick
+  per client address alone (30); an attacker with many addresses is only slowed by that. Caddy
+  adds a limit per client address in front (10 a minute). At most 16 password hashes wait at a time, the rest of the sign-ins get a quick
   503 instead of queueing behind them.
 - WebSockets: 5 per user, 500 in all, 30 tickets a minute per user (`WS_MAX_PER_USER`,
   `WS_MAX_TOTAL`, `WS_TICKETS_PER_MINUTE`). uvicorn reads at most 8 KiB per client message.
@@ -483,7 +489,6 @@ actions are pinned to commit SHAs.
   through an outbox like the telemetry, so a Redis outage cannot hide an alarm from live screens.
 - Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
   them at once; the access token's lifetime is the only window left.
-- TLS and rate limits in Caddy are deliberately deferred to day 4.
 - Alertmanager with a real notification channel (e-mail, chat) for the Prometheus alerts.
 - Alarm name, severity and metric are read from the rule when an alarm is shown, so editing a
   rule renames its past alarms (the thresholds an alarm opened with are stored). Snapshot

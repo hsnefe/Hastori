@@ -87,10 +87,11 @@ jobs:
         run: >-
           docker run --rm --entrypoint promtool -v "$PWD/infra/prometheus:/etc/prometheus:ro"
           prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
+      # The gateway image carries the rate limiter module, so validate with that one
       - name: Caddyfile
-        run: >-
-          docker run --rm -v "$PWD/infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
-          caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+        run: |
+          docker build -t hastori-caddy:ci infra/caddy
+          docker run --rm -e "ALLOWED_HOSTS=127.0.0.1 localhost"             -v "$PWD/infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"             hastori-caddy:ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
   images:
     runs-on: ubuntu-24.04
