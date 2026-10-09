@@ -5,8 +5,9 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
+from hastori_api.audit import audit
 from hastori_api.deps import (
     Scope,
     Session,
@@ -17,9 +18,17 @@ from hastori_api.deps import (
 from hastori_api.errors import COMMON_ERRORS, ApiError, ErrorResponse
 from hastori_api.queries.sites import list_sites
 from hastori_api.ratelimit import LoginLimiter
-from hastori_api.schemas import LoginIn, MeOut, SiteOut, TokenOut
+from hastori_api.schemas import (
+    DemoConfigOut,
+    DemoLoginIn,
+    LoginIn,
+    MeOut,
+    PasswordChangeIn,
+    SiteOut,
+    TokenOut,
+)
 from hastori_api.scope import load_scope
-from hastori_api.security import issue_access_token, verify_password
+from hastori_api.security import hash_password_async, issue_access_token, verify_password
 from hastori_api.tokens import RefreshStore
 from hastori_common.models import User
 from hastori_common.settings import Settings
@@ -68,9 +77,10 @@ def _cookie_header(settings: Settings, token: str) -> dict[str, str]:
     }
 
 
-def _token_out(settings: Settings, user_id: uuid.UUID) -> TokenOut:
+def _token_out(settings: Settings, user_id: uuid.UUID, token_version: int = 0) -> TokenOut:
     return TokenOut(
-        access_token=issue_access_token(settings, user_id), expires_in=settings.access_token_ttl_s
+        access_token=issue_access_token(settings, user_id, token_version=token_version),
+        expires_in=settings.access_token_ttl_s,
     )
 
 
@@ -106,20 +116,72 @@ async def login(
         raise ApiError(429, "Too many failed sign-in attempts", headers={"Retry-After": str(wait)})
     row = (
         await session.execute(
-            select(User.id, User.password_hash).where(func.lower(User.email) == email)
+            select(User.id, User.password_hash, User.is_active, User.token_version).where(
+                func.lower(User.email) == email
+            )
         )
     ).first()
     # Hashing takes ~100 ms of CPU and may queue: do not hold a pooled connection meanwhile
     # (ten simultaneous sign-ins would otherwise empty the pool for everybody else).
     await session.close()
     ok = await verify_password(body.password, row.password_hash if row else None)
-    if row is None or not ok:
+    if row is None or not ok or not row.is_active:
         await limiter.failed(email, ip)
-        # The same answer for an unknown address and a wrong password.
+        # The same answer for an unknown address, a wrong password and a deactivated account.
         raise ApiError(401, "Wrong e-mail or password")
     await limiter.succeeded(email, ip)
-    _set_cookie(response, settings, await store.issue(row.id))
-    return _token_out(settings, row.id)
+    _set_cookie(response, settings, await store.issue(row.id, row.token_version))
+    return _token_out(settings, row.id, row.token_version)
+
+
+@router.get(
+    "/demo",
+    response_model=DemoConfigOut,
+    summary="Is the passwordless demo sign-in on",
+    description="Lets the sign-in page decide whether to offer the demo buttons.",
+)
+async def demo_config(settings: SettingsDep) -> DemoConfigOut:
+    return DemoConfigOut(enabled=settings.demo_login)
+
+
+@router.post(
+    "/demo",
+    response_model=TokenOut,
+    summary="Sign in as the demo viewer or the demo site admin, without a password",
+    description=(
+        "Only when the operator set `DEMO_LOGIN=true` (404 otherwise). Signs in as the one fixed "
+        "viewer or the one fixed site admin; the system admin cannot be reached this way. Same "
+        "answer as `/auth/login`: an access token and the refresh cookie."
+    ),
+    responses={
+        404: {"model": ErrorResponse, "description": "Demo sign-in is off"},
+        422: COMMON_ERRORS[422],
+    },
+)
+async def demo_login(
+    body: DemoLoginIn,
+    response: Response,
+    session: Session,
+    settings: SettingsDep,
+    store: Store,
+) -> TokenOut:
+    if not settings.demo_login:
+        raise ApiError(404, "Not found")
+    email = settings.demo_viewer_email if body.role == "viewer" else settings.demo_site_admin_email
+    row = (
+        await session.execute(
+            select(User.id, User.role, User.is_active, User.token_version).where(
+                func.lower(User.email) == email.lower()
+            )
+        )
+    ).first()
+    # The account must exist and really have the role asked for: a wrong DEMO_*_EMAIL (say, the
+    # system admin's) must never turn this into a back door.
+    if row is None or row.role != body.role or not row.is_active:
+        raise ApiError(404, "Not found")
+    await session.close()
+    _set_cookie(response, settings, await store.issue(row.id, row.token_version))
+    return _token_out(settings, row.id, row.token_version)
 
 
 @router.post(
@@ -163,11 +225,57 @@ async def refresh(
             "A backing service is unavailable; try again shortly",
             headers={"Retry-After": "2", **_cookie_header(settings, rotation.token)},
         ) from exc
-    if scope is None:  # the user was removed meanwhile
+    # The user was removed or deactivated meanwhile, or changed their password (or had it
+    # changed): the session was signed in under an older token version.
+    if scope is None or scope.token_version != rotation.token_version:
         await store.revoke(rotation.token)
         raise ApiError(401, "Invalid refresh token", headers=gone)
     _set_cookie(response, settings, rotation.token)
-    return _token_out(settings, rotation.user_id)
+    return _token_out(settings, rotation.user_id, scope.token_version)
+
+
+@router.post(
+    "/password",
+    response_model=TokenOut,
+    summary="Change your own password",
+    description=(
+        "Needs the current password. Every other session of the user ends at once (their access "
+        "tokens too, within seconds of the change: the version check happens on every request); "
+        "this one continues with the new token and cookie in the response."
+    ),
+    responses={
+        401: {"model": ErrorResponse, "description": "Not signed in, or wrong current password"},
+        422: COMMON_ERRORS[422],
+    },
+)
+async def change_password(
+    body: PasswordChangeIn,
+    response: Response,
+    scope: Scope,
+    session: Session,
+    settings: SettingsDep,
+    store: Store,
+    refresh_token: Annotated[str | None, Cookie(alias=COOKIE)] = None,
+) -> TokenOut:
+    current = await session.scalar(select(User.password_hash).where(User.id == scope.user_id))
+    await session.close()
+    if not await verify_password(body.current_password, current):
+        # 401, not 403: the browser's sign-in screen is the only thing a wrong password can mean.
+        raise ApiError(401, "Wrong current password")
+    new_hash = await hash_password_async(body.new_password)
+    version = await session.scalar(
+        update(User)
+        .where(User.id == scope.user_id)
+        .values(password_hash=new_hash, token_version=User.token_version + 1)
+        .returning(User.token_version)
+    )
+    audit(session, scope, "auth.password_change", "user", scope.user_id)
+    await session.commit()
+    if refresh_token:
+        await store.revoke(refresh_token)
+    assert version is not None
+    _set_cookie(response, settings, await store.issue(scope.user_id, version))
+    return _token_out(settings, scope.user_id, version)
 
 
 @router.post(

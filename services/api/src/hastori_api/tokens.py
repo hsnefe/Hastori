@@ -50,11 +50,12 @@ else
   redis.call('HSET', KEYS[1], 'used_at', ARGV[1])
 end
 local new_key = rt .. ARGV[3]
-redis.call('HSET', new_key, 'uid', h['uid'], 'fid', h['fid'], 'used_at', '', 'born', tostring(born))
+redis.call('HSET', new_key, 'uid', h['uid'], 'fid', h['fid'], 'used_at', '', 'born', tostring(born),
+  'tv', h['tv'] or '0')
 redis.call('EXPIRE', new_key, ttl)
 redis.call('SADD', fam_key, ARGV[3])
 redis.call('EXPIRE', fam_key, ttl)
-return {'ok', h['uid'], h['fid']}
+return {'ok', h['uid'], h['fid'], h['tv'] or '0'}
 """
 
 
@@ -67,6 +68,7 @@ class Rotation:
     status: Literal["ok", "missing", "reused"]
     user_id: uuid.UUID | None = None
     token: str | None = None  # the new refresh token, when status is "ok"
+    token_version: int = 0  # the user's token version when the session was signed in
 
 
 class RefreshStore:
@@ -90,8 +92,8 @@ class RefreshStore:
         """Only this hash is stored: a leaked Redis dump holds no usable token."""
         return hashlib.sha256(token.encode()).hexdigest()
 
-    async def issue(self, user_id: uuid.UUID) -> str:
-        """A new family for a fresh login."""
+    async def issue(self, user_id: uuid.UUID, token_version: int = 0) -> str:
+        """A new family for a fresh login (under the user's current token version)."""
         token, family = secrets.token_urlsafe(32), uuid.uuid4().hex
         digest = self.digest(token)
         pipe = self.redis.pipeline(transaction=True)
@@ -102,6 +104,7 @@ class RefreshStore:
                 "fid": family,
                 "used_at": "",
                 "born": repr(self.clock()),
+                "tv": str(token_version),
             },
         )
         pipe.expire(RT + digest, self.ttl_s)
@@ -126,7 +129,7 @@ class RefreshStore:
         )
         result = [_text(x) for x in raw]
         if result[0] == "ok":
-            return Rotation("ok", uuid.UUID(result[1]), new_token)
+            return Rotation("ok", uuid.UUID(result[1]), new_token, int(result[3]))
         if result[0] == "reused":
             return Rotation("reused", uuid.UUID(result[1]))
         return Rotation("missing")

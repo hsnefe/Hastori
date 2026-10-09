@@ -324,6 +324,7 @@ def _rule_body() -> dict[str, Any]:
 # Every endpoint that needs a token, asked without one (and with a bad one): always 401.
 UNAUTHENTICATED: list[tuple[str, str]] = [
     ("GET", "/auth/me"),
+    ("POST", "/auth/password"),
     ("POST", "/ws-ticket"),
     ("GET", "/sites"),
     ("POST", "/sites"),

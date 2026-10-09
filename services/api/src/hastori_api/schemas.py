@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+MIN_PASSWORD = 12
 Role = Literal["system_admin", "site_admin", "viewer"]
 Severity = Literal["warning", "critical"]
 AlarmState = Literal["active", "acknowledged", "cleared"]
@@ -65,6 +66,19 @@ class TokenOut(BaseModel):
 class WsTicketOut(BaseModel):
     ticket: str = Field(description="single use; open /api/v1/ws?ticket=<this>")
     expires_in: int = Field(description="seconds until the ticket expires")
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=MIN_PASSWORD, max_length=256)
+
+
+class DemoConfigOut(BaseModel):
+    enabled: bool = Field(description="whether POST /auth/demo signs anybody in")
+
+
+class DemoLoginIn(BaseModel):
+    role: Literal["viewer", "site_admin"] = Field(description="which demo account to enter as")
 
 
 class LoginIn(BaseModel):
@@ -252,6 +266,9 @@ class AlarmOut(BaseModel):
     opened_at: datetime
     acked_at: datetime | None = None
     acked_by: uuid.UUID | None = None
+    acked_by_label: str | None = Field(
+        default=None, description="who acknowledged: the name, never the e-mail address"
+    )
     cleared_at: datetime | None = None
     peak_value: float | None = None
 
@@ -259,7 +276,7 @@ class AlarmOut(BaseModel):
 class TimelineEntry(BaseModel):
     event: Literal["opened", "acknowledged", "cleared"]
     at: datetime
-    by: str | None = Field(default=None, description="who acknowledged (e-mail)")
+    by: str | None = Field(default=None, description="who acknowledged (their name)")
 
 
 class AlarmDetailOut(AlarmOut):
@@ -273,14 +290,13 @@ class AlarmDetailOut(AlarmOut):
 
 # -- users --------------------------------------------------------------------------------------
 
-MIN_PASSWORD = 12
-
 
 class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: Role
     site_ids: list[uuid.UUID]
+    is_active: bool = True
     created_at: datetime
 
 
@@ -297,3 +313,6 @@ class UserPatch(BaseModel):
     role: Role | None = None
     site_ids: list[uuid.UUID] | None = None
     password: str | None = Field(default=None, min_length=MIN_PASSWORD, max_length=256)
+    is_active: bool | None = Field(
+        default=None, description="false deactivates: sign-in and every session end at once"
+    )

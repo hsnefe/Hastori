@@ -384,8 +384,9 @@ async def make_alarm(
     await sql(
         api,
         "INSERT INTO alarms (id, rule_id, device_id, state, opened_at, acked_at, acked_by, "
-        "cleared_at, peak_value) "
-        "VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM users WHERE email = $7), $8, 88.5)",
+        "acked_by_label, cleared_at, peak_value) "
+        "VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM users WHERE email = $7), "
+        "split_part($7, '@', 1), $8, 88.5)",
         alarm_id,
         rule.id,
         device.id,
@@ -429,7 +430,9 @@ async def test_an_alarm_comes_with_its_timeline_and_rule(api: ApiHarness) -> Non
     c = await api.signed_in("izmir_viewer")
     body = (await c.get(f"/alarms/{alarm}")).json()
     assert [e["event"] for e in body["timeline"]] == ["opened", "acknowledged", "cleared"]
-    assert body["timeline"][1]["by"] == DEMO_USERS["izmir_admin"][0]
+    assert body["timeline"][1]["by"] == "izmir.admin"  # the name, not the e-mail address
+    assert body["acked_by_label"] == "izmir.admin"
+    assert "@" not in json.dumps(body)
     assert body["rule"]["threshold"] == 80 and body["rule"]["clear_threshold"] == 75
     assert body["acked_by"] is not None and body["cleared_at"] is not None
     assert body["threshold"] is None and body["clear_threshold"] is None  # opened before 0006

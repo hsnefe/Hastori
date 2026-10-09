@@ -59,9 +59,12 @@ async def hash_password_async(password: str) -> str:
         return await asyncio.to_thread(_hasher.hash, password)
 
 
-def issue_access_token(settings: Settings, user_id: uuid.UUID, now: float | None = None) -> str:
+def issue_access_token(
+    settings: Settings, user_id: uuid.UUID, now: float | None = None, token_version: int = 0
+) -> str:
     iat = int(now if now is not None else time.time())
     claims = {
+        "tv": token_version,
         "sub": str(user_id),
         "iat": iat,
         "exp": iat + settings.access_token_ttl_s,
@@ -73,8 +76,14 @@ def issue_access_token(settings: Settings, user_id: uuid.UUID, now: float | None
 
 
 def decode_access_token(settings: Settings, token: str) -> uuid.UUID:
-    """The user the token was issued to. Signature, expiry, issuer, audience and the algorithm
-    are all checked (the algorithm list is fixed: a token cannot choose `none`)."""
+    """The user the token was issued to."""
+    return decode_access_claims(settings, token)[0]
+
+
+def decode_access_claims(settings: Settings, token: str) -> tuple[uuid.UUID, int]:
+    """The user and the token version the token was issued under. Signature, expiry, issuer,
+    audience and the algorithm are all checked (the algorithm list is fixed: a token cannot
+    choose `none`). A token from before versions existed counts as version 0."""
     try:
         claims = jwt.decode(
             token,
@@ -84,7 +93,7 @@ def decode_access_token(settings: Settings, token: str) -> uuid.UUID:
             issuer=ISSUER,
             options={"require": ["exp", "iat", "sub", "iss", "aud"]},
         )
-        return uuid.UUID(claims["sub"])
+        return uuid.UUID(claims["sub"]), int(claims.get("tv", 0))
     except jwt.ExpiredSignatureError:
         raise unauthorized("Access token expired") from None
     except (jwt.InvalidTokenError, ValueError):

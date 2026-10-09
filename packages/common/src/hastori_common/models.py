@@ -64,6 +64,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False)
+    # Raised by a password change or a deactivation: tokens of an older version stop working.
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = _created()
     __table_args__ = (
         CheckConstraint("role IN ('system_admin','site_admin','viewer')", name="ck_users_role"),
@@ -160,6 +163,9 @@ class Alarm(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # The acknowledging user's name when they did it: shown instead of the e-mail address, and it
+    # outlives a renamed or removed account.
+    acked_by_label: Mapped[str | None] = mapped_column(Text)
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     peak_value: Mapped[float | None] = mapped_column(Float)
     # The rule's thresholds when the alarm opened (the rule may be edited later); NULL before 0006.

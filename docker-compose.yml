@@ -216,6 +216,8 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
       # Swagger UI / OpenAPI: off for a demo reachable from the internet (make env-public).
       API_DOCS: ${API_DOCS:-true}
+      # Passwordless "enter as viewer / site admin" buttons (POST /auth/demo); never the system admin.
+      DEMO_LOGIN: ${DEMO_LOGIN:-false}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]

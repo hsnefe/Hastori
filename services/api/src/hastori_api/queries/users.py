@@ -39,6 +39,7 @@ def _out(user: User, site_ids: list[uuid.UUID]) -> UserOut:
         email=user.email,
         role=user.role,  # type: ignore[arg-type]
         site_ids=site_ids,
+        is_active=user.is_active,
         created_at=user.created_at,
     )
 
@@ -147,7 +148,30 @@ async def patch_user(
 
     if new_hash is not None:
         user.password_hash = new_hash
+        user.token_version += 1  # every session of theirs ends (the access token too)
         changed["password"] = "changed"  # the fact, never the value
+
+    if body.is_active is not None and body.is_active != user.is_active:
+        if not body.is_active:
+            if user.id == scope.user_id:
+                raise conflict("You cannot deactivate your own account")
+            if user.role == SYSTEM_ADMIN:
+                admins = (
+                    await session.scalars(
+                        select(User.id)
+                        .where(
+                            User.org_id == scope.org_id,
+                            User.role == SYSTEM_ADMIN,
+                            User.is_active,
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+                if not [a for a in admins if a != user.id]:
+                    raise conflict("The last active system admin cannot be deactivated")
+            user.token_version += 1
+        user.is_active = body.is_active
+        changed["is_active"] = body.is_active
 
     audit(session, scope, "user.update", "user", user.id, changed)
     await session.commit()

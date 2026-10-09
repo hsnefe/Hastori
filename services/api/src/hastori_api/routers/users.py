@@ -44,7 +44,7 @@ async def get_user(user_id: uuid.UUID, scope: Scope, session: Session) -> UserOu
 @router.patch(
     "/{user_id}",
     response_model=UserOut,
-    summary="Change role, sites or password (system admin)",
+    summary="Change role, sites, password or active flag (system admin)",
     responses={409: {"model": ErrorResponse, "description": "The last system admin"}},
 )
 async def patch_user(

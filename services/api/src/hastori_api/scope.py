@@ -18,14 +18,14 @@ WRITERS = (SYSTEM_ADMIN, SITE_ADMIN)
 # system admin, the assigned ones otherwise).
 SCOPE_SQL = text(
     """
-    SELECT u.id, u.org_id, u.email, u.role,
+    SELECT u.id, u.org_id, u.email, u.role, u.token_version,
            COALESCE(array_agg(s.id) FILTER (WHERE s.id IS NOT NULL), '{}') AS site_ids
     FROM users u
     LEFT JOIN sites s
       ON s.org_id = u.org_id
      AND (u.role = 'system_admin'
           OR EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = u.id AND us.site_id = s.id))
-    WHERE u.id = :user_id
+    WHERE u.id = :user_id AND u.is_active
     GROUP BY u.id
     """
 )
@@ -38,6 +38,7 @@ class SiteScope:
     email: str
     role: str
     site_ids: frozenset[uuid.UUID]
+    token_version: int = 0
 
     @property
     def can_write(self) -> bool:
@@ -64,4 +65,5 @@ async def load_scope(session: AsyncSession, user_id: uuid.UUID) -> SiteScope | N
         email=row["email"],
         role=row["role"],
         site_ids=frozenset(row["site_ids"]),
+        token_version=row["token_version"],
     )

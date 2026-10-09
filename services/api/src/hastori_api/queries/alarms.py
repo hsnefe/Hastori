@@ -12,7 +12,7 @@ from hastori_api.errors import conflict, not_found
 from hastori_api.queries.rules import rule_out
 from hastori_api.schemas import AlarmDetailOut, AlarmOut, AlarmState, TimelineEntry
 from hastori_api.scope import WRITERS, SiteScope
-from hastori_common.models import Alarm, AlarmRule, Device, Site, User
+from hastori_common.models import Alarm, AlarmRule, Device, Site
 
 
 def _base(scope: SiteScope) -> Select[Alarm, AlarmRule, Device, Site]:
@@ -23,6 +23,11 @@ def _base(scope: SiteScope) -> Select[Alarm, AlarmRule, Device, Site]:
         .join(Site, Site.id == Device.site_id)
         .where(Device.site_id.in_(scope.site_ids))
     )
+
+
+def display_name(email: str) -> str:
+    """The name shown for a user: their address without the domain (users have no other name)."""
+    return email.split("@", 1)[0]
 
 
 def _out(alarm: Alarm, rule: AlarmRule, device: Device, site: Site) -> AlarmOut:
@@ -40,6 +45,7 @@ def _out(alarm: Alarm, rule: AlarmRule, device: Device, site: Site) -> AlarmOut:
         opened_at=alarm.opened_at,
         acked_at=alarm.acked_at,
         acked_by=alarm.acked_by,
+        acked_by_label=alarm.acked_by_label,
         cleared_at=alarm.cleared_at,
         peak_value=alarm.peak_value,
     )
@@ -91,8 +97,9 @@ async def alarm_detail(
     alarm, rule, device, site = await get_alarm(session, scope, alarm_id)
     timeline = [TimelineEntry(event="opened", at=alarm.opened_at)]
     if alarm.acked_at is not None:
-        who = await session.scalar(select(User.email).where(User.id == alarm.acked_by))
-        timeline.append(TimelineEntry(event="acknowledged", at=alarm.acked_at, by=who))
+        timeline.append(
+            TimelineEntry(event="acknowledged", at=alarm.acked_at, by=alarm.acked_by_label)
+        )
     if alarm.cleared_at is not None:
         timeline.append(TimelineEntry(event="cleared", at=alarm.cleared_at))
     return AlarmDetailOut(
@@ -110,7 +117,12 @@ async def acknowledge(session: AsyncSession, scope: SiteScope, alarm_id: uuid.UU
     result = await session.execute(
         update(Alarm)
         .where(Alarm.id == alarm_id, Alarm.state == "active")
-        .values(state="acknowledged", acked_at=func.now(), acked_by=scope.user_id)
+        .values(
+            state="acknowledged",
+            acked_at=func.now(),
+            acked_by=scope.user_id,
+            acked_by_label=display_name(scope.email),
+        )
         .returning(Alarm.id)
     )
     if result.scalar_one_or_none() is None:

@@ -209,6 +209,20 @@ class ApiHarness:
         c.token = r.json()["access_token"]
         return c
 
+    def variant(self, **settings_overrides: Any) -> "ApiHarness":
+        """The same database and Redis behind an application with other settings."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from hastori_api.app import create_app
+        from hastori_common.settings import Settings
+
+        url = self.dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+        engine = create_async_engine(url)
+        settings = Settings(  # type: ignore[call-arg]
+            _env_file=None, database_url=url, jwt_secret="t" * 40, **settings_overrides
+        )
+        return ApiHarness(create_app(settings, engine, self.redis), engine, self.redis, self.dsn)
+
     async def close(self) -> None:
         for c in self._clients:
             await c.aclose()

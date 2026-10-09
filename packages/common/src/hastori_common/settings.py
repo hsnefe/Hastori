@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     trusted_proxies: str = "127.0.0.1"
     # Swagger UI and the OpenAPI document. Switch off for a demo reachable from the internet.
     api_docs: bool = True
+    # Passwordless sign-in as one fixed viewer or one fixed site admin, for a public demo
+    # (POST /auth/demo). Never the system admin. Off unless the operator turns it on.
+    demo_login: bool = False
+    demo_viewer_email: str = "izmir.izleyici@demo.hastori.local"
+    demo_site_admin_email: str = "izmir.admin@demo.hastori.local"
 
     seed_system_admin_password: str = "admin_demo_pw"
     seed_site_admin_password: str = "siteadmin_demo_pw"

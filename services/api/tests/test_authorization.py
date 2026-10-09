@@ -202,6 +202,8 @@ PUBLIC = {
     ("POST", "/auth/login"),
     ("POST", "/auth/refresh"),
     ("POST", "/auth/logout"),
+    ("GET", "/auth/demo"),
+    ("POST", "/auth/demo"),
     ("GET", "/healthz"),
     ("GET", "/readyz"),
 }

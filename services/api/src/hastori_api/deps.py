@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hastori_api.errors import unauthorized
 from hastori_api.ratelimit import LoginLimiter
 from hastori_api.scope import SiteScope, load_scope
-from hastori_api.security import decode_access_token
+from hastori_api.security import decode_access_claims
 from hastori_api.tokens import RefreshStore
 from hastori_common.settings import Settings
 
@@ -55,9 +55,11 @@ async def get_scope(
 ) -> SiteScope:
     if credentials is None:
         raise unauthorized()
-    user_id = decode_access_token(settings, credentials.credentials)
+    user_id, token_version = decode_access_claims(settings, credentials.credentials)
     scope = await load_scope(session, user_id)
-    if scope is None:  # a valid token for a user that no longer exists
+    # A user that no longer exists or was deactivated, or a token from before their last
+    # password change or deactivation: the same answer, so the token says nothing about which.
+    if scope is None or scope.token_version != token_version:
         raise unauthorized("Invalid access token")
     return scope
 
