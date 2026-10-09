@@ -1,0 +1,96 @@
+# Every push and pull request: lint, types and tests of the Python services and the dashboard, the
+# configuration files, and a build of every image (nothing is pushed). The tests need no Docker:
+# pgserver brings a real PostgreSQL. TimescaleDB, RabbitMQ and the broker are covered by
+# `make smoke`, `make e2e` and `make resilience` against a running stack.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.19" # the version in the service images
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: mypy
+        run: uv run mypy packages services scripts tests conftest.py
+      # Migrations are excluded above (generated style, long SQL lines): looser rules (risk E8).
+      - name: migrations
+        run: make lint-migrations
+      - name: pytest
+        run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.15.0" # the version in web/Dockerfile
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # Runtime dependencies only: the dev toolchain (eslint) is not shipped (risk E7).
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=high
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  config:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: docker compose config
+        run: |
+          python3 scripts/gen_env.py
+          touch infra/mosquitto/health.pw
+          docker compose --profile sim config -q
+      - name: prometheus config and alert rules
+        run: >-
+          docker run --rm --entrypoint promtool -v "$PWD/infra/prometheus:/etc/prometheus:ro"
+          prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
+      - name: Caddyfile
+        run: >-
+          docker run --rm -v "$PWD/infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ingestion, alarm, api, simulator, web]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build ${{ matrix.image }}
+        run: |
+          if [ "${{ matrix.image }}" = web ]; then
+            docker build --build-arg API_ORIGIN=http://api:8000 -t hastori-web:ci web
+          else
+            docker build -f "services/${{ matrix.image }}/Dockerfile" -t "hastori-${{ matrix.image }}:ci" .
+          fi

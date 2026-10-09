@@ -388,6 +388,12 @@ token rotation under parallel requests). What this cannot show is TimescaleDB it
 `0002` is replaced by a plain table and view with the same columns), RabbitMQ, the MQTT broker and
 the containers: `make smoke`, `make resilience` and `make e2e` check those on the running stack.
 
+CI (`.github/workflows/ci.yml`, every push and pull request) runs the same: `ruff` and the format
+check, `mypy`, the migrations with looser rules (`make lint-migrations`), `pytest` on Linux, the
+dashboard's lint, types and tests, `npm audit --omit=dev`, `docker compose config`, `promtool`
+on the Prometheus rules, `caddy validate`, and a build of every image (nothing is pushed). The
+actions are pinned to commit SHAs.
+
 ## Known limits
 
 - **One main meter per site.** The daily kWh sums the site's main panel (the energy analyzer). A
@@ -470,7 +476,7 @@ the containers: `make smoke`, `make resilience` and `make e2e` check those on th
   through an outbox like the telemetry, so a Redis outage cannot hide an alarm from live screens.
 - Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
   them at once; the access token's lifetime is the only window left.
-- TLS and rate limits in Caddy, and CI are deliberately deferred to day 4.
+- TLS and rate limits in Caddy are deliberately deferred to day 4.
 - Alertmanager with a real notification channel (e-mail, chat) for the Prometheus alerts.
 - Alarm name, severity and metric are read from the rule when an alarm is shown, so editing a
   rule renames its past alarms (the thresholds an alarm opened with are stored). Snapshot

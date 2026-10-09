@@ -1,4 +1,4 @@
-.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint web-install web-dev web-check
+.PHONY: env env-public up down logs certs mqtt-auth migrate seed seed-reset simulate fault smoke smoke-quick resilience reset-alarm-queue e2e test lint lint-migrations web-install web-dev web-check
 
 DEVICE ?= izmir-komp-1
 KIND ?= overheat
@@ -72,6 +72,13 @@ lint:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run mypy packages services scripts tests conftest.py
+	$(MAKE) lint-migrations
+
+# Migrations are outside the rules above (long SQL lines, generated layout): looser ones (E8),
+# no format check, mypy without strict mode
+lint-migrations:
+	uv run ruff check migrations/versions --select E,F,I,UP,B --ignore E501
+	uv run mypy --config-file= --ignore-missing-imports --check-untyped-defs migrations/versions
 
 # The dashboard with hot reload on http://127.0.0.1:3000; /api goes to the API on 8000 (Next rewrite)
 # and the WebSocket straight to it (web/.env.development). The packaged one is on :8080.
