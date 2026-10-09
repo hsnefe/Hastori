@@ -85,7 +85,10 @@ function AlarmRow({
       </div>
       <div className="alarm-actions">
         {alarm.state === "acknowledged" ? (
-          <span className="badge badge-idle">{ALARM_STATES.acknowledged}</span>
+          <span className="badge badge-idle" title={alarm.acked_by_label ? `Onaylayan: ${alarm.acked_by_label}` : undefined}>
+            {ALARM_STATES.acknowledged}
+            {alarm.acked_by_label ? ` · ${alarm.acked_by_label}` : ""}
+          </span>
         ) : canAck ? (
           <button type="button" className="primary" disabled={busy} onClick={onAck}>
             {busy ? "Onaylanıyor…" : "Onayla"}

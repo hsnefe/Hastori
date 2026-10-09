@@ -132,6 +132,19 @@ export function createApi(deps: ApiDeps) {
       const out = await request<TokenOut>("POST", "/auth/login", { email, password }, { auth: false });
       accessToken = out.access_token;
     },
+    /** Whether the server offers the passwordless demo buttons (false when it cannot be asked). */
+    async demoEnabled(): Promise<boolean> {
+      try {
+        return (await request<{ enabled: boolean }>("GET", "/auth/demo", undefined, { auth: false })).enabled;
+      } catch {
+        return false;
+      }
+    },
+    /** Sign in as the demo viewer or the demo site admin (only when the server has it on). */
+    async demoLogin(role: "viewer" | "site_admin"): Promise<void> {
+      const out = await request<TokenOut>("POST", "/auth/demo", { role }, { auth: false });
+      accessToken = out.access_token;
+    },
     /** Called on page load: a token from the refresh cookie, no session, or "unavailable". */
     restore: refresh,
     async logout(): Promise<void> {

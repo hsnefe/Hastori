@@ -84,6 +84,8 @@ export interface Alarm {
   opened_at: string;
   acked_at: string | null;
   acked_by: string | null;
+  /** Who acknowledged: a name, never an e-mail address. */
+  acked_by_label: string | null;
   cleared_at: string | null;
   peak_value: number | null;
 }

@@ -16,6 +16,8 @@ interface SessionValue {
   status: Status;
   me: Me | null;
   login: (email: string, password: string) => Promise<void>;
+  /** The passwordless demo accounts (the server decides whether they exist). */
+  demoLogin: (role: "viewer" | "site_admin") => Promise<void>;
   logout: () => Promise<void>;
   /** After "unavailable": try to restore the session again. */
   retry: () => void;
@@ -73,6 +75,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setStatus("authenticated");
   }, []);
 
+  const demoLogin = useCallback(async (role: "viewer" | "site_admin") => {
+    await api.demoLogin(role);
+    const user = await api.get<Me>("/auth/me");
+    setMe(user);
+    setStatus("authenticated");
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
@@ -86,7 +95,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setStatus("anonymous");
   }, [queryClient, toast]);
 
-  const value = useMemo(() => ({ status, me, login, logout, retry }), [status, me, login, logout, retry]);
+  const value = useMemo(
+    () => ({ status, me, login, demoLogin, logout, retry }),
+    [status, me, login, demoLogin, logout, retry],
+  );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 

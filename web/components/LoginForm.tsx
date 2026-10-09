@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { formatDuration } from "@/lib/format";
 import { useSession } from "@/lib/session";
 
@@ -20,12 +20,23 @@ export function loginErrorMessage(error: unknown): string {
 }
 
 export function LoginForm() {
-  const { status, me, login } = useSession();
+  const { status, me, login, demoLogin } = useSession();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [demo, setDemo] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.demoEnabled().then((on) => {
+      if (!cancelled) setDemo(on);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (status === "authenticated") router.replace(me?.sites[0] ? `/sites/${me.sites[0].id}` : "/");
@@ -37,6 +48,17 @@ export function LoginForm() {
     setError(null);
     try {
       await login(email.trim(), password);
+    } catch (e) {
+      setError(loginErrorMessage(e));
+      setBusy(false);
+    }
+  }
+
+  async function enterAs(role: "viewer" | "site_admin") {
+    setBusy(true);
+    setError(null);
+    try {
+      await demoLogin(role);
     } catch (e) {
       setError(loginErrorMessage(e));
       setBusy(false);
@@ -73,6 +95,19 @@ export function LoginForm() {
         <button type="submit" className="primary" disabled={busy || status === "loading"}>
           {busy ? "Giriş yapılıyor…" : "Giriş yap"}
         </button>
+        {demo ? (
+          <div className="demo-entry">
+            <p className="muted">Demo: parola gerekmez. Tesis yöneticisi kuralları değiştirebilir ve alarmları onaylayabilir.</p>
+            <div className="row-actions">
+              <button type="button" disabled={busy || status === "loading"} onClick={() => void enterAs("viewer")}>
+                İzleyici olarak gir
+              </button>
+              <button type="button" disabled={busy || status === "loading"} onClick={() => void enterAs("site_admin")}>
+                Tesis yöneticisi olarak gir
+              </button>
+            </div>
+          </div>
+        ) : null}
       </form>
     </main>
   );

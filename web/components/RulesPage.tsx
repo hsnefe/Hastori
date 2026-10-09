@@ -4,11 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import { formatNumber, METRICS, SEVERITIES } from "@/lib/format";
+import { useDevices } from "@/lib/hooks";
+import { formatNumber, METRIC_ORDER, METRICS, SEVERITIES } from "@/lib/format";
 import { parseDecimal, parseInteger } from "@/lib/numbers";
 import { canWrite, useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import type { Page, Rule, RuleBody } from "@/lib/types";
+import type { Metric, Page, Rule, RuleBody, RuleKind, Severity } from "@/lib/types";
 
 export function ruleBody(rule: Rule, over: Partial<RuleBody>): RuleBody {
   return {
@@ -46,6 +47,80 @@ export function ruleError(error: unknown): string {
   return "Kural kaydedilemedi. Tekrar deneyin.";
 }
 
+/** What the "new rule" form holds: everything as typed. */
+export interface NewRuleForm {
+  name: string;
+  deviceId: string;
+  kind: RuleKind;
+  metric: Metric;
+  operator: ">" | "<";
+  threshold: string;
+  clear: string;
+  duration: string;
+  windowMin: string;
+  severity: Severity;
+}
+
+export const EMPTY_RULE_FORM: NewRuleForm = {
+  name: "",
+  deviceId: "",
+  kind: "threshold",
+  metric: "temperature_c",
+  operator: ">",
+  threshold: "",
+  clear: "",
+  duration: "30",
+  windowMin: "15",
+  severity: "warning",
+};
+
+export const KIND_LABELS: Record<RuleKind, string> = {
+  threshold: "Eşik (değer aşılırsa)",
+  reactive_ratio: "Reaktif oran",
+  no_data: "Veri gelmezse",
+};
+
+/** The body for POST /alarm-rules from the form, or the sentence that says what is wrong. */
+export function newRuleBody(f: NewRuleForm): { body: RuleBody & { device_id: string } } | { error: string } {
+  const name = f.name.trim();
+  if (!name) return { error: "Kurala bir ad verin." };
+  if (name.length > 120) return { error: "Ad en fazla 120 karakter olabilir." };
+  if (!f.deviceId) return { error: "Bir cihaz seçin." };
+  const duration = parseInteger(f.duration);
+  const base = { name, device_id: f.deviceId, kind: f.kind, severity: f.severity, enabled: true };
+
+  if (f.kind === "no_data") {
+    if (duration === null || duration < 10 || duration > 600) return { error: "Süre 10 ile 600 sn arasında tam sayı olmalı." };
+    return {
+      body: { ...base, metric: f.metric, operator: ">", threshold: 0, clear_threshold: 0, duration_s: duration, window_s: null },
+    };
+  }
+  const threshold = parseDecimal(f.threshold);
+  const clear = parseDecimal(f.clear);
+  if (threshold === null || clear === null) return { error: "Eşikler sayı olmalı (örnek: 80 ya da 0,18; binlik ayracı yok)." };
+  if (duration === null || duration > 600) return { error: "Süre 0 ile 600 sn arasında tam sayı olmalı." };
+  const operator = f.kind === "reactive_ratio" ? ">" : f.operator;
+  if (operator === ">" && clear > threshold) return { error: "Kapanma eşiği eşikten büyük olamaz." };
+  if (operator === "<" && clear < threshold) return { error: "Kapanma eşiği eşikten küçük olamaz." };
+  let windowS: number | null = null;
+  if (f.kind === "reactive_ratio") {
+    const minutes = parseInteger(f.windowMin);
+    if (minutes === null || minutes < 1 || minutes > 60) return { error: "Pencere 1 ile 60 dk arasında tam sayı olmalı." };
+    windowS = minutes * 60;
+  }
+  return {
+    body: {
+      ...base,
+      metric: f.kind === "reactive_ratio" ? "reactive_power_kvar" : f.metric,
+      operator,
+      threshold,
+      clear_threshold: clear,
+      duration_s: duration,
+      window_s: windowS,
+    },
+  };
+}
+
 export function RulesPage({ siteId }: { siteId: string }) {
   const { me } = useSession();
   const editable = canWrite(me);
@@ -54,12 +129,19 @@ export function RulesPage({ siteId }: { siteId: string }) {
     queryFn: () => api.get<Page<Rule>>(`/alarm-rules?site_id=${siteId}&size=100`),
   });
   const [editing, setEditing] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   return (
     <section className="card" aria-labelledby="rules-title">
       <div className="card-head">
         <h2 id="rules-title">Alarm kuralları</h2>
+        {editable && !creating ? (
+          <button type="button" onClick={() => setCreating(true)}>
+            Yeni kural
+          </button>
+        ) : null}
       </div>
+      {editable && creating ? <RuleCreator siteId={siteId} onDone={() => setCreating(false)} /> : null}
       {!editable ? <p className="muted">Kuralları yalnızca tesis ve sistem yöneticileri değiştirebilir.</p> : null}
       {rules.isPending ? <p className="muted">Yükleniyor…</p> : null}
       {rules.isError ? <p className="form-error">Kurallar alınamadı.</p> : null}
@@ -91,6 +173,132 @@ export function RulesPage({ siteId }: { siteId: string }) {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function RuleCreator({ siteId, onDone }: { siteId: string; onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const devices = useDevices(siteId);
+  const [form, setForm] = useState<NewRuleForm>(EMPTY_RULE_FORM);
+  const [error, setError] = useState<string | null>(null);
+  const set = <K extends keyof NewRuleForm>(key: K, value: NewRuleForm[K]) => setForm((f) => ({ ...f, [key]: value }));
+
+  const create = useMutation({
+    mutationFn: (body: RuleBody & { device_id: string }) => api.post<Rule>("/alarm-rules", body),
+    onSuccess: () => {
+      toast("success", "Kural oluşturuldu.");
+      void queryClient.invalidateQueries({ queryKey: ["rules", siteId] });
+      onDone();
+    },
+    onError: (e) => setError(ruleError(e)),
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    const result = newRuleBody(form);
+    if ("error" in result) return setError(result.error);
+    setError(null);
+    create.mutate(result.body);
+  }
+
+  const list = (devices.data ?? []).filter((d) => d.is_active);
+  const ratio = form.kind === "reactive_ratio";
+  const silence = form.kind === "no_data";
+  return (
+    <form className="rule-new" onSubmit={submit} aria-label="Yeni alarm kuralı">
+      <div className="fields">
+        <label>
+          Ad
+          <input value={form.name} onChange={(e) => set("name", e.target.value)} maxLength={120} required />
+        </label>
+        <label>
+          Cihaz
+          <select value={form.deviceId} onChange={(e) => set("deviceId", e.target.value)} required>
+            <option value="">Seçin…</option>
+            {list.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Tür
+          <select value={form.kind} onChange={(e) => set("kind", e.target.value as RuleKind)}>
+            {(Object.keys(KIND_LABELS) as RuleKind[]).map((k) => (
+              <option key={k} value={k}>
+                {KIND_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+        {!ratio ? (
+          <label>
+            Ölçüm
+            <select value={form.metric} onChange={(e) => set("metric", e.target.value as Metric)}>
+              {METRIC_ORDER.map((m) => (
+                <option key={m} value={m}>
+                  {METRICS[m].label} ({METRICS[m].unit})
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {!silence && !ratio ? (
+          <label>
+            Koşul
+            <select value={form.operator} onChange={(e) => set("operator", e.target.value as ">" | "<")}>
+              <option value=">">Büyükse (&gt;)</option>
+              <option value="<">Küçükse (&lt;)</option>
+            </select>
+          </label>
+        ) : null}
+        {!silence ? (
+          <>
+            <label>
+              Eşik
+              <input inputMode="decimal" value={form.threshold} onChange={(e) => set("threshold", e.target.value)} required />
+            </label>
+            <label>
+              Kapanma eşiği
+              <input inputMode="decimal" value={form.clear} onChange={(e) => set("clear", e.target.value)} required />
+            </label>
+          </>
+        ) : null}
+        <label>
+          {silence ? "Veri gelmeme süresi (sn)" : "Süre (sn)"}
+          <input inputMode="numeric" value={form.duration} onChange={(e) => set("duration", e.target.value)} required />
+        </label>
+        {ratio ? (
+          <label>
+            Pencere (dk)
+            <input inputMode="numeric" value={form.windowMin} onChange={(e) => set("windowMin", e.target.value)} required />
+          </label>
+        ) : null}
+        <label>
+          Önem
+          <select value={form.severity} onChange={(e) => set("severity", e.target.value as Severity)}>
+            <option value="warning">{SEVERITIES.warning}</option>
+            <option value="critical">{SEVERITIES.critical}</option>
+          </select>
+        </label>
+      </div>
+      {ratio ? <p className="muted">Reaktif oran yalnızca ana pano analizöründe anlamlıdır; eşik 0,18 gibi bir orandır.</p> : null}
+      {error ? (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <div className="row-actions">
+        <button type="submit" className="primary" disabled={create.isPending}>
+          {create.isPending ? "Oluşturuluyor…" : "Oluştur"}
+        </button>
+        <button type="button" onClick={onDone}>
+          Vazgeç
+        </button>
+      </div>
+    </form>
   );
 }
 

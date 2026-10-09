@@ -7,7 +7,7 @@ import type { Rule } from "@/lib/types";
 import { defaultDevice } from "../Dashboard";
 import { COMPLETE_COVERAGE } from "../EnergyCard";
 import { loginErrorMessage } from "../LoginForm";
-import { RuleChangedError, ruleBody, ruleError } from "../RulesPage";
+import { EMPTY_RULE_FORM, RuleChangedError, newRuleBody, ruleBody, ruleError, type NewRuleForm } from "../RulesPage";
 
 const device = (id: string, type: string): LiveDevice => ({
   id,
@@ -103,5 +103,42 @@ describe("rule values", () => {
 describe("rule saving", () => {
   it("tells the editor that somebody else changed the rule meanwhile", () => {
     expect(ruleError(new RuleChangedError())).toContain("başka biri");
+  });
+});
+
+describe("new rule form", () => {
+  const form = (over: Partial<NewRuleForm>): NewRuleForm => ({ ...EMPTY_RULE_FORM, name: "Yeni", deviceId: "dev-1", ...over });
+  const bodyOf = (f: NewRuleForm) => {
+    const r = newRuleBody(f);
+    if ("error" in r) throw new Error(r.error);
+    return r.body;
+  };
+
+  it("builds a threshold rule, reading a decimal comma", () => {
+    const body = bodyOf(form({ threshold: "80,5", clear: "75", duration: "30" }));
+    expect(body).toMatchObject({ kind: "threshold", metric: "temperature_c", operator: ">", threshold: 80.5, clear_threshold: 75, duration_s: 30, window_s: null, device_id: "dev-1" });
+  });
+  it("refuses a closing threshold on the wrong side", () => {
+    expect(newRuleBody(form({ threshold: "80", clear: "85" }))).toEqual({ error: "Kapanma eşiği eşikten büyük olamaz." });
+    expect(newRuleBody(form({ operator: "<", threshold: "10", clear: "5" }))).toEqual({ error: "Kapanma eşiği eşikten küçük olamaz." });
+  });
+  it("refuses an empty or ambiguous number instead of making it zero", () => {
+    expect("error" in newRuleBody(form({ threshold: "", clear: "75" }))).toBe(true);
+    expect("error" in newRuleBody(form({ threshold: "1.000", clear: "75" }))).toBe(true);
+  });
+  it("makes a reactive ratio rule on reactive power with a window in seconds", () => {
+    const body = bodyOf(form({ kind: "reactive_ratio", metric: "current_a", threshold: "0,18", clear: "0,15", windowMin: "15" }));
+    expect(body).toMatchObject({ metric: "reactive_power_kvar", operator: ">", window_s: 900 });
+    expect("error" in newRuleBody(form({ kind: "reactive_ratio", threshold: "0,18", clear: "0,15", windowMin: "90" }))).toBe(true);
+  });
+  it("makes a silence rule without thresholds, between 10 and 600 s", () => {
+    const body = bodyOf(form({ kind: "no_data", duration: "45" }));
+    expect(body).toMatchObject({ kind: "no_data", operator: ">", threshold: 0, clear_threshold: 0, duration_s: 45, window_s: null });
+    expect("error" in newRuleBody(form({ kind: "no_data", duration: "5" }))).toBe(true);
+    expect("error" in newRuleBody(form({ kind: "no_data", duration: "601" }))).toBe(true);
+  });
+  it("needs a name and a device", () => {
+    expect(newRuleBody(form({ name: "  " }))).toEqual({ error: "Kurala bir ad verin." });
+    expect(newRuleBody(form({ deviceId: "" }))).toEqual({ error: "Bir cihaz seçin." });
   });
 });
