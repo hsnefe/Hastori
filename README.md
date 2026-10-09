@@ -38,6 +38,7 @@ Windows (`winget install ezwinports.make`); PowerShell equivalents are below.
 git clone <repo-url> hastori && cd hastori
 make up          # .env with random secrets, TLS certs, MQTT users/ACL, then timescaledb + mosquitto + rabbitmq + redis + migrate + ingestion + alarm + api + web + caddy (http://127.0.0.1:8080)
 make seed        # demo org, 2 sites, 7 devices, 5 users, 5 alarm rules (idempotent)
+make backfill    # 7 days of synthetic history, so the energy card is not empty (see "Demo data")
 make simulate    # start the field simulator
 make smoke       # automated day-1 checks
 make web-install && make web-dev   # optional: the dashboard with hot reload on http://127.0.0.1:3000 (needs Node 24)
@@ -54,7 +55,9 @@ and `antalya.admin@demo.hastori.local` (site admins), `izmir.izleyici@demo.hasto
 `antalya.izleyici@demo.hastori.local` (viewers; two sites make the tenant isolation visible);
 passwords are the `SEED_*` values in `.env` (`admin_demo_pw`, `siteadmin_demo_pw`,
 `viewer_demo_pw` by default). All other secrets in `.env` are generated randomly by `make env`.
-**Those three are public.** Never expose the stack beyond `127.0.0.1` (Cloudflare Tunnel, a
+The sign-in page also has two buttons, "İzleyici olarak gir" and "Tesis yöneticisi olarak gir",
+that need no password (`DEMO_LOGIN=true`, on in `.env.example`, off unless set in compose: see
+"Demo data and demo sign-in"). **Those three passwords are public.** Never expose the stack beyond `127.0.0.1` (Cloudflare Tunnel, a
 public server) without `make env-public` first.
 
 Services refuse to start with a published demo value in a secret they use
@@ -86,6 +89,7 @@ capabilities and a memory limit.
 | `make migrate`   | `docker compose run --rm migrate` |
 | `make seed`      | `uv run python scripts/seed.py` |
 | `make seed-reset`| `uv run python scripts/seed.py --reset` (YAML wins: re-hash passwords, restore rules) |
+| `make backfill`  | `uv run python scripts/backfill.py --days 7` (`DAYS=3 make backfill`): synthetic history |
 | `make simulate`  | `docker compose --profile sim up -d --build simulator` |
 | `make fault`     | `uv run python scripts/fault.py izmir-komp-1 overheat 120` |
 | `make smoke`     | `uv run python scripts/smoke.py` |
@@ -132,13 +136,14 @@ internet, a tunnel (see "Putting it on the internet" under Known limits).
 | | |
 |---|---|
 | `POST /auth/login`, `/auth/refresh`, `/auth/logout`, `GET /auth/me` | access token (15 min, in the body) + rotating refresh token (7 days, httpOnly cookie) |
+| `POST /auth/password`, `GET`/`POST /auth/demo` | change your own password (ends your other sessions); is the passwordless demo sign-in on, and sign in as the demo viewer or site admin |
 | `GET /sites`, `POST`/`PATCH /sites` | sites you can see; create and change (system admin) |
 | `GET /sites/{id}/devices` | devices with their latest value per metric and an `online` flag |
 | `GET /devices/{id}/measurements?metric=&from=&to=&interval=` | raw, 1 minute or 1 hour points (`auto` picks); at most 5000 points and 90 days |
 | `GET /sites/{id}/consumption/daily?days=` | kWh per day of the site's time zone, with the share of minutes that have data |
 | `GET /alarms`, `GET /alarms/{id}`, `POST /alarms/{id}/ack` | history, one alarm with its timeline, acknowledge |
 | `GET`/`POST`/`PUT`/`DELETE /alarm-rules` | rule management (site admins for their sites); `DELETE` disables |
-| `GET`/`POST /users`, `GET`/`PATCH /users/{id}` | user management (system admin) |
+| `GET`/`POST /users`, `GET`/`PATCH /users/{id}` | user management (system admin); `PATCH` takes role, sites, password and `is_active` |
 | `POST /ws-ticket`, `GET /ws?ticket=` (WebSocket) | live measurements and alarm events of one site at a time (see "Dashboard (day 3)") |
 
 A user sees only the sites assigned to them (a system admin sees all sites of the organisation).
@@ -147,6 +152,8 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
 `{"error": {"code": "...", "message": "..."}}`.
 
 ## Design notes
+
+Decision records: [TimescaleDB over InfluxDB](docs/adr/0001-timescaledb-over-influxdb.md), [RabbitMQ over Kafka](docs/adr/0002-rabbitmq-over-kafka.md), [WebSocket over SSE](docs/adr/0003-websocket-over-sse.md); open risks are in [docs/design-risks.md](docs/design-risks.md).
 
 ### Ingestion (day 1)
 
@@ -230,6 +237,31 @@ bad token **401**; a backing service that is down is a **503**. Every error has 
 - Request ids: Caddy makes one per request (never taken from the client), sends it to the API as
   `X-Request-ID`, writes it into its access log as `request_id` and returns it to the browser. The
   API logs every line of that request with the same `request_id` and echoes it, also on a 500.
+
+### Demo data and demo sign-in (day 4)
+
+- **Synthetic history.** `make backfill` writes 1 to 7 days (default 7) of one-minute readings
+  from the simulator's own signal model (`hastori_simulator.signals`: the factory's shift, the
+  hotel's evening peak), refreshes the one-minute aggregate for exactly that window and stops where
+  real data starts. It never overwrites a row, injects no faults and opens no alarms. **The numbers
+  on the energy card before the first real day are synthetic**, not measured. Raw data is kept 7
+  days, so more is refused; the refresh always has both bounds (`NULL, NULL` would rebuild the
+  aggregate from what raw data is left and delete older minutes, risk D1).
+- **Demo sign-in.** With `DEMO_LOGIN=true`, `POST /auth/demo {"role": "viewer" | "site_admin"}` signs in
+  as the one fixed Izmir viewer or Izmir site admin (`DEMO_VIEWER_EMAIL`, `DEMO_SITE_ADMIN_EMAIL`)
+  and answers like `/auth/login`. The system admin cannot be asked for, the account must have
+  the requested role (a wrong e-mail setting does not become a back door) and be active; with the
+  setting off the endpoint is a 404. The gateway counts it with sign-in. A site admin can change
+  rules: on a public demo run `make seed-reset` nightly (risk G17).
+- **Sessions end when they should.** `users.token_version` goes up on a password change (your own or
+  an admin's) and on deactivation (`PATCH /users/{id} {"is_active": false}`; not yourself, not the
+  last active system admin). The access token carries the version and every request compares it,
+  the refresh session keeps the version it was signed in under: both die at once, a deactivated
+  user cannot sign in and gets the same 401 as a wrong password. `POST /auth/password` needs the
+  current password and keeps the device it was called from signed in.
+- **Who acknowledged.** `alarms.acked_by_label` stores the name at acknowledgement (the e-mail
+  address before the `@`: users have no other name). The API and the screen show that, never the
+  address, and it stays when the account is renamed. Migration `0009` fills it for old alarms.
 
 ### Dashboard (day 3)
 
@@ -389,7 +421,7 @@ is the single-column one; on a wide screen the chart, the daily energy and the o
 
 `make test` needs no Docker: it starts a real PostgreSQL (the `pgserver` package) and a Redis that
 runs Lua (`fakeredis`), builds the schema with the real migrations and runs the services against
-them: about 300 Python tests (plus 65 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
+them: about 360 Python tests (plus 74 Vitest tests for the dashboard: `make web-check`), several of them on the properties that matter most (the state machine in
 virtual time including a restart after every possible sample; the authorization matrix; refresh
 token rotation under parallel requests). What this cannot show is TimescaleDB itself (migration
 `0002` is replaced by a plain table and view with the same columns), RabbitMQ, the MQTT broker and
@@ -429,9 +461,9 @@ actions are pinned to commit SHAs.
   alarm for it exists only where a `no_data` rule is set (the demo has one, on `izmir-komp-1`).
   A threshold rule's open alarm stays open while its device is silent, and a pending count that
   would span a silence restarts.
-- A password change does not end the user's refresh sessions (the access token is checked against
-  the database on every request, the refresh token only against Redis). A refresh session ends
-  at the latest 30 days after the sign-in (`REFRESH_MAX_LIFE_S`), however often it is renewed.
+- A refresh session ends at the latest 30 days after the sign-in (`REFRESH_MAX_LIFE_S`), however
+  often it is renewed. A password change or deactivation ends sessions through the token version;
+  there is no screen for it yet (the API has it), and users cannot be deleted, only deactivated.
 - The login limiter counts failures per e-mail address and client address (5 in 5 minutes) and
   per client address alone (30); an attacker with many addresses is only slowed by that. Caddy
   adds a limit per client address in front (10 a minute). At most 16 password hashes wait at a time, the rest of the sign-ins get a quick
@@ -487,8 +519,6 @@ actions are pinned to commit SHAs.
 - PostgreSQL row-level security as a second line behind the `SiteScope` filter; the alarm
   service sharded by device (consistent hashing) instead of one active consumer; the alarm events
   through an outbox like the telemetry, so a Redis outage cannot hide an alarm from live screens.
-- Refresh sessions tied to a per-user token version, so a password change or a deactivation ends
-  them at once; the access token's lifetime is the only window left.
 - Alertmanager with a real notification channel (e-mail, chat) for the Prometheus alerts.
 - Alarm name, severity and metric are read from the rule when an alarm is shown, so editing a
   rule renames its past alarms (the thresholds an alarm opened with are stored). Snapshot
