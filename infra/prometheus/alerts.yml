@@ -1,0 +1,77 @@
+# Pipeline health (risks G2, E3, G16). There is no notification channel: the alerts show in
+# Prometheus (/alerts) and on the Grafana dashboard. Thresholds are sized for the demo fleet
+# (6 devices, one sample every 2 s); check with `promtool check rules`.
+groups:
+  - name: hastori-pipeline
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.job }} does not answer /metrics"
+
+      # G16: no_data cannot tell a fleet that fell silent from a dead pipeline, so this alert
+      # covers both. It also fires while the simulator is not running.
+      - alert: FleetSilent
+        expr: sum(rate(ingest_messages_total[1m])) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "No telemetry is being accepted from any device"
+
+      - alert: AlarmQueueBacklog
+        expr: rabbitmq_detailed_queue_messages{queue="alarm.telemetry"} > 1000
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "alarm.telemetry holds {{ $value }} messages: the alarm service is behind"
+
+      # The DLQ is bounded (drop-head at 10 000): at the cap its depth stops growing, so rejected
+      # messages are also watched at the source.
+      - alert: DeadLettersGrowing
+        expr: delta(rabbitmq_detailed_queue_messages{queue="alarm.telemetry.dlq"}[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "alarm.telemetry.dlq grew by {{ $value }} in 10 minutes"
+
+      - alert: AlarmMessagesRejected
+        expr: increase(alarm_rejected_total[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "The alarm service dead-lettered messages ({{ $labels.reason }})"
+
+      - alert: AlarmEvaluationLag
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(alarm_eval_lag_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 from device timestamp to alarm evaluation is {{ $value | humanizeDuration }}"
+
+      - alert: IngestOutboxBacklog
+        expr: ingest_outbox_depth > 500
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} stored events are not yet published to RabbitMQ"
+
+      - alert: IngestRejecting
+        expr: sum by (reason) (rate(ingest_rejected_total[5m])) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Ingestion rejects messages ({{ $labels.reason }})"
+
+      - alert: MqttReconnectChurn
+        expr: increase(ingest_mqtt_connects_total[10m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "Ingestion reconnected to the broker {{ $value }} times in 10 minutes"
+
+      - alert: ApiServerErrors
+        expr: sum(rate(api_requests_total{status=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "The API answers with 5xx errors"

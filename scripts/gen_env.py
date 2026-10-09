@@ -35,6 +35,7 @@ SECRET_KEYS = (
     "REDIS_PASSWORD",
     "JWT_SECRET",
     "SIM_CONTROL_TOKEN",
+    "GRAFANA_ADMIN_PASSWORD",
 )
 # Compose reads the Redis password from a file (a secret), not from the environment.
 REDIS_SECRET_FILE = ROOT / "infra" / "redis" / "redis.pw"
